@@ -1,0 +1,35 @@
+[package]
+name = "rust-lib-aggs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+timely = "0.12"
+differential-dataflow = "0.12"
+
+futures = "0.3.17"
+
+tungstenite = { version = "0.16", features = ["native-tls"] }
+
+url = "2.2"
+
+serde = { version = "1.0.130", features = ["derive"] }
+serde_json = "1.0"
+serde_repr = "0.1"
+
+reqwest = "0.11"
+
+thiserror = "1.0"
+
+tinyvec = { version = "1.5", features = ["serde"]  }
+arrayvec = { version = "0.7", features = ["serde"] }
+
+rust_decimal = { version = "1.16", features = ["maths", "serde-float"] }
+rust_decimal_macros = "1.16"
+
+abomonation = "0.7"
+abomonation_derive = "0.5"
+
+crossbeam = "0.8.1"
