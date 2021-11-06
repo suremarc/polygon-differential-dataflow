@@ -6,9 +6,9 @@ use std::thread::spawn;
 use tungstenite::{connect, Message};
 
 // use differential_dataflow::operators::iterate::Variable;
-use differential_dataflow::operators::reduce::Reduce;
+use differential_dataflow::operators::Count;
 
-use rust_lib_aggs::ws;
+use rust_lib_aggs::ws::{self, Trade};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -20,7 +20,7 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type Trade = ws::CryptoTrade;
+type MyTrade = ws::CryptoTrade;
 
 fn main() -> Result<(), MainError> {
     let url =
@@ -49,7 +49,7 @@ fn main() -> Result<(), MainError> {
 
     spawn(move || loop {
         if let Message::Text(data) = socket.read_message().unwrap() {
-            let messages: Vec<ws::Message<Trade>> = serde_json::from_str(data.as_str()).unwrap();
+            let messages: Vec<ws::Message<MyTrade>> = serde_json::from_str(data.as_str()).unwrap();
             for message in messages.iter() {
                 if let ws::Message::Trade(trade) = message {
                     tx.send(*trade).unwrap();
@@ -72,19 +72,20 @@ fn main() -> Result<(), MainError> {
             // Determine the most recent inputs for each key.
             input
                 .to_collection(scope)
-                .map(|trade: Trade| (trade.t, trade))
-                .reduce(|_key, input, output| {
-                    let max = input.last().unwrap();
-                    output.push((*max.0, ws::Trade::timestamp(max.0)));
-                })
+                .map(|trade: MyTrade| trade.x)
+                .count()
                 .probe_with(&mut probe)
                 .inspect(|x| println!("{:?}", x));
         });
 
-        // Load input (a binary tree).
-        input.advance_to(0_i64);
         for trade in rx.iter() {
+            if trade.timestamp() > *input.time() {
+                input.advance_to(trade.timestamp());
+            }
             input.insert(trade);
+
+            input.flush();
+            worker.step();
         }
     })
     .expect("Computation terminated abnormally");

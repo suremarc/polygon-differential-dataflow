@@ -89,9 +89,9 @@ pub type CurrencyPair = arrayvec::ArrayString<10>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CryptoTrade {
+    pub t: i64,
     pub pair: CurrencyPair,
     pub p: Decimal,
-    pub t: i64,
     pub s: rust_decimal::Decimal,
     pub c: tinyvec::ArrayVec<[u32; 4]>,
     pub x: u32,
