@@ -50,6 +50,7 @@ pub struct Action {
 }
 
 pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
+    fn ticker(&self) -> String;
     fn price(&self) -> Decimal;
     fn timestamp(&self) -> i64;
     fn exchange(&self) -> u32;
@@ -74,6 +75,9 @@ fn default_c() -> tinyvec::ArrayVec<[u32; 6]> {
 }
 
 impl Trade for StockTrade {
+    fn ticker(&self) -> String {
+        String::from(self.sym.as_str())
+    }
     fn price(&self) -> Decimal {
         self.p
     }
@@ -85,12 +89,10 @@ impl Trade for StockTrade {
     }
 }
 
-pub type CurrencyPair = arrayvec::ArrayString<10>;
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CryptoTrade {
     pub t: i64,
-    pub pair: CurrencyPair,
+    pub pair: arrayvec::ArrayString<10>,
     pub p: Decimal,
     pub s: rust_decimal::Decimal,
     pub c: tinyvec::ArrayVec<[u32; 4]>,
@@ -101,6 +103,9 @@ pub struct CryptoTrade {
 impl Abomonation for CryptoTrade {}
 
 impl Trade for CryptoTrade {
+    fn ticker(&self) -> String {
+        String::from(self.pair.as_str())
+    }
     fn price(&self) -> Decimal {
         self.p
     }

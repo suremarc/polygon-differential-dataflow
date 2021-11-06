@@ -72,7 +72,7 @@ fn main() -> Result<(), MainError> {
             // Determine the most recent inputs for each key.
             input
                 .to_collection(scope)
-                .map(|trade: MyTrade| trade.x)
+                .map(|trade: MyTrade| trade.ticker())
                 .count()
                 .probe_with(&mut probe)
                 .inspect(|x| println!("{:?}", x));
