@@ -52,13 +52,13 @@ pub struct Action {
 pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
     fn ticker(&self) -> String;
     fn price(&self) -> Decimal;
-    fn timestamp(&self) -> i64;
+    fn timestamp(&self) -> u64;
     fn exchange(&self) -> u32;
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StockTrade {
-    pub t: i64,
+    pub t: u64,
     pub sym: arrayvec::ArrayString<8>,
     pub x: u32,
     pub z: Tape,
@@ -81,7 +81,7 @@ impl Trade for StockTrade {
     fn price(&self) -> Decimal {
         self.p
     }
-    fn timestamp(&self) -> i64 {
+    fn timestamp(&self) -> u64 {
         self.t
     }
     fn exchange(&self) -> u32 {
@@ -91,7 +91,7 @@ impl Trade for StockTrade {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CryptoTrade {
-    pub t: i64,
+    pub t: u64,
     pub pair: arrayvec::ArrayString<10>,
     pub p: Decimal,
     pub s: rust_decimal::Decimal,
@@ -109,7 +109,7 @@ impl Trade for CryptoTrade {
     fn price(&self) -> Decimal {
         self.p
     }
-    fn timestamp(&self) -> i64 {
+    fn timestamp(&self) -> u64 {
         self.t
     }
     fn exchange(&self) -> u32 {

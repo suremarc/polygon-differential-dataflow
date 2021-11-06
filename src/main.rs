@@ -1,14 +1,16 @@
 extern crate differential_dataflow;
 extern crate timely;
 
-use std::thread::spawn;
+use std::{thread::spawn, time::Duration};
 
 use tungstenite::{connect, Message};
 
 // use differential_dataflow::operators::iterate::Variable;
-use differential_dataflow::operators::Count;
+use differential_dataflow::operators::{iterate::Variable, Count};
 
 use rust_lib_aggs::ws::{self, Trade};
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -69,13 +71,39 @@ fn main() -> Result<(), MainError> {
 
         // Build a dataflow to present most recent values for keys.
         worker.dataflow(|scope| {
-            // Determine the most recent inputs for each key.
-            input
-                .to_collection(scope)
-                .map(|trade: MyTrade| trade.ticker())
-                .count()
-                .probe_with(&mut probe)
-                .inspect(|x| println!("{:?}", x));
+            // Prepare some delayed feedback from the output.
+            // Explanation of `delay` deferred for the moment.
+            const RETENTION: Duration = Duration::from_secs(1);
+            const BAR_LENGTH: Duration = Duration::from_secs(30);
+            let retractions = Variable::new(scope, RETENTION.as_millis().try_into().unwrap());
+
+            let trades = input.to_collection(scope);
+            let trades_recent = trades.filter(|trade: &MyTrade| {
+                let since_the_epoch = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards");
+                Duration::from_millis(trade.timestamp()) + RETENTION + BAR_LENGTH > since_the_epoch
+            });
+
+            // trades_recent
+            //     .probe_with(&mut probe)
+            //     .inspect(|trade| println!("{:?}", trade));
+
+            let trade_buckets = trades.map(|trade: MyTrade| {
+                let agg_timestamp =
+                    trade.timestamp() as u128 / BAR_LENGTH.as_millis() * BAR_LENGTH.as_millis();
+                ((trade.ticker(), agg_timestamp), trade)
+            });
+
+            let aggs = trade_buckets.map(|tup| tup.0).count();
+
+            aggs.probe_with(&mut probe).inspect(|x| {
+                if x.2 == 1 {
+                    println!("{:?}", x)
+                }
+            });
+
+            retractions.set(&trades.concat(&trades_recent.negate()));
         });
 
         for trade in rx.iter() {
