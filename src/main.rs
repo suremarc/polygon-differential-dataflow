@@ -5,12 +5,9 @@ use std::{thread::spawn, time::Duration};
 
 use tungstenite::{connect, Message};
 
-// use differential_dataflow::operators::iterate::Variable;
-use differential_dataflow::operators::{iterate::Variable, Count};
+use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Count};
 
 use rust_lib_aggs::ws::{self, Trade};
-
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -42,7 +39,7 @@ fn main() -> Result<(), MainError> {
         &mut socket,
         &ws::Action {
             action: ws::ActionType::Subscribe,
-            params: "XT.*".to_string(),
+            params: format!("XT.{}", std::env::args().nth(1).unwrap()),
         },
     )?;
 
@@ -65,52 +62,60 @@ fn main() -> Result<(), MainError> {
         }
     });
 
-    timely::execute_from_args(std::env::args(), move |worker| {
+    timely::execute_from_args(std::env::args().skip(2), move |worker| {
         let mut input = differential_dataflow::input::InputSession::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
-        // Build a dataflow to present most recent values for keys.
         worker.dataflow(|scope| {
-            // Prepare some delayed feedback from the output.
-            // Explanation of `delay` deferred for the moment.
-            const RETENTION: Duration = Duration::from_secs(1);
-            const BAR_LENGTH: Duration = Duration::from_secs(30);
-            let retractions = Variable::new(scope, RETENTION.as_millis().try_into().unwrap());
+            const RETENTION: Duration = Duration::from_secs(15);
+            const BAR_LENGTH: Duration = Duration::from_secs(1);
+            let retractions = SemigroupVariable::new(scope, RETENTION);
 
-            let trades = input.to_collection(scope);
-            let trades_recent = trades.filter(|trade: &MyTrade| {
-                let since_the_epoch = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards");
-                Duration::from_millis(trade.timestamp()) + RETENTION + BAR_LENGTH > since_the_epoch
-            });
+            let trades = input
+                .to_collection(scope)
+                .concat(&retractions.negate())
+                .consolidate();
+            // .probe_with(&mut probe)
+            // .inspect(|x| println!("{:?}", x));
 
-            // trades_recent
-            //     .probe_with(&mut probe)
-            //     .inspect(|trade| println!("{:?}", trade));
+            let frontier_timestamp =
+                probe.with_frontier(|frontier| *frontier.first().unwrap_or(&Duration::default()));
 
-            let trade_buckets = trades.map(|trade: MyTrade| {
-                let agg_timestamp =
-                    trade.timestamp() as u128 / BAR_LENGTH.as_millis() * BAR_LENGTH.as_millis();
-                ((trade.ticker(), agg_timestamp), trade)
-            });
+            let trades_by_window = trades
+                .map(|trade: MyTrade| {
+                    let agg_timestamp =
+                        trade.timestamp() - trade.timestamp() % (BAR_LENGTH.as_millis() as i64);
+                    (agg_timestamp, trade)
+                })
+                .filter(move |&(agg_timestamp, _)| {
+                    Duration::from_millis(agg_timestamp as u64) + RETENTION > frontier_timestamp
+                });
 
-            let aggs = trade_buckets.map(|tup| tup.0).count();
+            let trades_recent = trades_by_window.map(|(_, trade)| trade);
+            retractions.set(&trades_recent);
 
-            aggs.probe_with(&mut probe).inspect(|x| {
-                if x.2 == 1 {
-                    println!("{:?}", x)
-                }
-            });
-
-            retractions.set(&trades.concat(&trades_recent.negate()));
+            let _count_per_window_per_ticker = trades_by_window
+                .map(|(agg_timestamp, trade)| (agg_timestamp, trade.ticker()))
+                .count()
+                .consolidate()
+                .probe_with(&mut probe)
+                .inspect(|(((agg_timestamp, ticker), count), _ts, diff)| {
+                    if *diff > 0 {
+                        println!("{:?}", (agg_timestamp, ticker, count));
+                    }
+                });
         });
 
-        for trade in rx.iter() {
-            if trade.timestamp() > *input.time() {
-                input.advance_to(trade.timestamp());
+        loop {
+            for trade in rx.try_iter() {
+                let ts_unix = Duration::from_millis(trade.timestamp() as u64);
+                if ts_unix > *input.time() {
+                    input.advance_to(ts_unix);
+                }
+
+                // println!("{:?}", trade);
+                input.insert(trade);
             }
-            input.insert(trade);
 
             input.flush();
             worker.step();
