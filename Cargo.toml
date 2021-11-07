@@ -33,3 +33,5 @@ abomonation = "0.7"
 abomonation_derive = "0.5"
 
 crossbeam = "0.8.1"
+
+keyed_priority_queue = "0.4"

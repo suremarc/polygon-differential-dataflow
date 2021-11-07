@@ -1,13 +1,19 @@
 extern crate differential_dataflow;
 extern crate timely;
 
-use std::{thread::spawn, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    thread::spawn,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Count};
+use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Reduce};
 
-use rust_lib_aggs::ws::{self, Trade};
+use keyed_priority_queue::KeyedPriorityQueue;
+
+use rust_lib_aggs::ws::{self, Decimal, Trade};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -62,47 +68,88 @@ fn main() -> Result<(), MainError> {
         }
     });
 
+    const BAR_LENGTH: Duration = Duration::from_secs(30);
+
+    let (aggs_tx, aggs_rx) = std::sync::mpsc::channel::<((i64, String), Decimal)>();
+    let mux = Arc::new(Mutex::new(aggs_tx));
+
+    let mut pq = KeyedPriorityQueue::<_, _>::new();
+
+    spawn(move || loop {
+        for ((agg_timestamp, ticker), value) in aggs_rx.try_iter() {
+            // println!("insert: {:?}", ((agg_timestamp, ticker.clone()), value));
+            pq.push(ticker, (agg_timestamp, value));
+        }
+
+        let start = SystemTime::now();
+        let since_the_epoch = start
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards");
+
+        while let Some((ticker, &(agg_timestamp, vwap))) = pq.peek() {
+            // println!("{}", agg_timestamp);
+            if Duration::from_millis(agg_timestamp as u64) + BAR_LENGTH < since_the_epoch {
+                println!("{:?}", (ticker, agg_timestamp, vwap));
+            } else {
+                break;
+            }
+
+            pq.pop();
+        }
+    });
+
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
         let mut input = differential_dataflow::input::InputSession::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
         worker.dataflow(|scope| {
-            const RETENTION: Duration = Duration::from_secs(15);
-            const BAR_LENGTH: Duration = Duration::from_secs(1);
+            const RETENTION: Duration = Duration::from_secs(15 * 60);
+            let retractions = SemigroupVariable::new(scope, RETENTION);
 
-            let trades = input.to_collection(scope);
-            // .probe_with(&mut probe)
-            // .inspect(|x| println!("{:?}", x));
+            let tx;
+            {
+                let guard = mux.lock();
+                tx = guard.unwrap().clone();
+            }
 
-            let frontier_timestamp =
-                probe.with_frontier(|frontier| *frontier.first().unwrap_or(&Duration::default()));
+            let trades = input
+                .to_collection(scope)
+                .concat(&retractions)
+                .consolidate();
 
-            let trades_by_window = trades
-                .map(|trade: MyTrade| {
-                    let agg_timestamp =
-                        trade.timestamp() - trade.timestamp() % (BAR_LENGTH.as_millis() as i64);
-                    (agg_timestamp, trade)
+            let trades_by_window = trades.map(|trade: MyTrade| {
+                let agg_timestamp =
+                    trade.timestamp() - trade.timestamp() % (BAR_LENGTH.as_millis() as i64);
+                (agg_timestamp, trade)
+            });
+
+            let trades_recent = trades_by_window.map(|(_, trade)| trade);
+            retractions.set(&trades_recent.negate());
+
+            let trades_by_window_by_ticker = trades_by_window
+                .map(|(agg_timestamp, trade)| ((agg_timestamp, trade.ticker()), trade));
+
+            trades_by_window_by_ticker
+                .reduce(|_key, input, output: &mut Vec<(Decimal, i32)>| {
+                    let value_total: Decimal = input
+                        .iter()
+                        .map(|&(trade, _)| trade.price() * trade.volume())
+                        .sum();
+                    let volume_total: Decimal =
+                        input.iter().map(|&(trade, _)| trade.volume()).sum();
+
+                    output.push((value_total / volume_total, 1))
                 })
-                .filter(move |&(agg_timestamp, _)| {
-                    Duration::from_millis(agg_timestamp as u64) + RETENTION > frontier_timestamp
-                });
-
-            let _count_per_window_per_ticker = trades_by_window
-                .map(|(agg_timestamp, trade)| (agg_timestamp, trade.ticker()))
-                .consolidate()
-                .count()
                 .probe_with(&mut probe)
                 .inspect(move |(((agg_timestamp, ticker), count), ts, diff)| {
                     if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
-                        println!("{:?}", (((agg_timestamp, ticker), count), ts, diff));
+                        tx.send(((*agg_timestamp, ticker.clone()), *count))
+                            .expect("couldn't send");
                     }
                 });
         });
 
         loop {
-            input.flush();
-            worker.step();
-
             for trade in rx.try_iter() {
                 let ts_unix = Duration::from_millis(trade.timestamp() as u64);
                 if ts_unix > *input.time() {
@@ -112,6 +159,9 @@ fn main() -> Result<(), MainError> {
                 // println!("{:?}", trade);
                 input.insert(trade);
             }
+
+            input.flush();
+            worker.step();
         }
     })
     .expect("Computation terminated abnormally");

@@ -1,8 +1,12 @@
+use std::{
+    iter::Sum,
+    ops::{Add, AddAssign, Div, Mul, Neg},
+};
+
 use abomonation::Abomonation;
+use differential_dataflow::difference::{Monoid, Semigroup};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-
-use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum EventType {
@@ -49,9 +53,70 @@ pub struct Action {
     pub params: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Decimal(rust_decimal::Decimal);
+
+impl Add for Decimal {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Decimal(self.0 + rhs.0)
+    }
+}
+
+impl<'a> AddAssign<&'a Decimal> for Decimal {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.0.add_assign(rhs.0)
+    }
+}
+
+impl Mul for Decimal {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        Decimal(self.0 * rhs.0)
+    }
+}
+
+impl Div for Decimal {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self {
+        Decimal(self.0 / rhs.0)
+    }
+}
+
+impl Neg for Decimal {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Decimal(-self.0)
+    }
+}
+
+impl Sum for Decimal {
+    fn sum<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = Self>,
+    {
+        Decimal(iter.map(|dec| dec.0).sum())
+    }
+}
+
+impl Semigroup for Decimal {
+    fn is_zero(&self) -> bool {
+        self.0.is_zero()
+    }
+}
+
+impl Monoid for Decimal {
+    fn zero() -> Self {
+        Decimal(rust_decimal::Decimal::ZERO)
+    }
+}
+
+impl Abomonation for Decimal {}
+
 pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
     fn ticker(&self) -> String;
     fn price(&self) -> Decimal;
+    fn volume(&self) -> Decimal;
     fn timestamp(&self) -> i64;
     fn exchange(&self) -> u32;
 }
@@ -81,6 +146,9 @@ impl Trade for StockTrade {
     fn price(&self) -> Decimal {
         self.p
     }
+    fn volume(&self) -> Decimal {
+        Decimal(rust_decimal::Decimal::new(self.s as i64, 0))
+    }
     fn timestamp(&self) -> i64 {
         self.t
     }
@@ -94,7 +162,7 @@ pub struct CryptoTrade {
     pub t: i64,
     pub pair: arrayvec::ArrayString<10>,
     pub p: Decimal,
-    pub s: rust_decimal::Decimal,
+    pub s: Decimal,
     pub c: tinyvec::ArrayVec<[u32; 4]>,
     pub x: u32,
     pub r: u64,
@@ -108,6 +176,9 @@ impl Trade for CryptoTrade {
     }
     fn price(&self) -> Decimal {
         self.p
+    }
+    fn volume(&self) -> Decimal {
+        self.s
     }
     fn timestamp(&self) -> i64 {
         self.t
