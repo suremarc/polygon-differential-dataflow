@@ -69,12 +69,8 @@ fn main() -> Result<(), MainError> {
         worker.dataflow(|scope| {
             const RETENTION: Duration = Duration::from_secs(15);
             const BAR_LENGTH: Duration = Duration::from_secs(1);
-            let retractions = SemigroupVariable::new(scope, RETENTION);
 
-            let trades = input
-                .to_collection(scope)
-                .concat(&retractions.negate())
-                .consolidate();
+            let trades = input.to_collection(scope);
             // .probe_with(&mut probe)
             // .inspect(|x| println!("{:?}", x));
 
@@ -91,22 +87,22 @@ fn main() -> Result<(), MainError> {
                     Duration::from_millis(agg_timestamp as u64) + RETENTION > frontier_timestamp
                 });
 
-            let trades_recent = trades_by_window.map(|(_, trade)| trade);
-            retractions.set(&trades_recent);
-
             let _count_per_window_per_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| (agg_timestamp, trade.ticker()))
-                .count()
                 .consolidate()
+                .count()
                 .probe_with(&mut probe)
-                .inspect(|(((agg_timestamp, ticker), count), _ts, diff)| {
-                    if *diff > 0 {
-                        println!("{:?}", (agg_timestamp, ticker, count));
+                .inspect(move |(((agg_timestamp, ticker), count), ts, diff)| {
+                    if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
+                        println!("{:?}", (((agg_timestamp, ticker), count), ts, diff));
                     }
                 });
         });
 
         loop {
+            input.flush();
+            worker.step();
+
             for trade in rx.try_iter() {
                 let ts_unix = Duration::from_millis(trade.timestamp() as u64);
                 if ts_unix > *input.time() {
@@ -116,9 +112,6 @@ fn main() -> Result<(), MainError> {
                 // println!("{:?}", trade);
                 input.insert(trade);
             }
-
-            input.flush();
-            worker.step();
         }
     })
     .expect("Computation terminated abnormally");
