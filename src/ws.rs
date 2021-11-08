@@ -39,7 +39,9 @@ pub enum ActionType {
     Subscribe,
 }
 
-#[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[repr(u8)]
 pub enum Tape {
     Missing = 0,
@@ -141,7 +143,7 @@ pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
     fn exchange(&self) -> u32;
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StockTrade {
     pub t: i64,
     pub sym: arrayvec::ArrayString<8>,

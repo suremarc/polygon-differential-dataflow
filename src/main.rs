@@ -23,7 +23,7 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type MyTrade = ws::CryptoTrade;
+type MyTrade = ws::StockTrade;
 
 fn main() -> Result<(), MainError> {
     let url =
@@ -65,7 +65,7 @@ fn main() -> Result<(), MainError> {
         }
     });
 
-    const BAR_LENGTH: Duration = Duration::from_secs(60);
+    const BAR_LENGTH: Duration = Duration::from_secs(1);
 
     let (aggs_tx, aggs_rx) = std::sync::mpsc::channel();
     let mux = Arc::new(Mutex::new(aggs_tx));
@@ -118,6 +118,13 @@ fn main() -> Result<(), MainError> {
                 .to_collection(scope)
                 .concat(&trades_old.negate())
                 .consolidate();
+            // trades
+            //     .map(|_| ())
+            //     .consolidate()
+            //     .probe_with(&mut probe)
+            //     .inspect(|(_, _, count)| {
+            //         println!("total trades: {}", count);
+            //     });
 
             // Feed these trades forward so that they get retracted once RETENTION has passed
             trades_old.set(&trades);
