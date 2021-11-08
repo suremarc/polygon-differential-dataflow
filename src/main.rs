@@ -75,7 +75,7 @@ fn main() -> Result<(), MainError> {
     spawn(move || loop {
         aggs.extend(aggs_rx.try_iter());
 
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(50));
 
         let start = SystemTime::now();
         let since_the_epoch = start
