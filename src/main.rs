@@ -9,9 +9,9 @@ use std::{
 
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Reduce};
+use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Join, Reduce};
 
-use rust_lib_aggs::ws::{self, Decimal, Trade};
+use rust_lib_aggs::ws::{self, Trade};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -80,11 +80,14 @@ fn main() -> Result<(), MainError> {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        aggs.retain(|(agg_timestamp, ticker), stats| {
+        aggs.retain(|(ticker, agg_timestamp), (vwap, volume)| {
             let expired =
                 Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
             if expired {
-                println!("{:?}", (ticker, agg_timestamp, stats));
+                println!(
+                    "{} - {}: {:.2e}, {:.2e}",
+                    agg_timestamp, ticker, *vwap, *volume
+                );
             }
 
             !expired
@@ -92,7 +95,7 @@ fn main() -> Result<(), MainError> {
     });
 
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
-        let mut input = differential_dataflow::input::InputSession::new();
+        let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
         let tx;
@@ -120,26 +123,36 @@ fn main() -> Result<(), MainError> {
             });
 
             let trades_by_window_by_ticker = trades_by_window
-                .map(|(agg_timestamp, trade)| ((agg_timestamp, trade.ticker()), trade));
+                .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
 
-            trades_by_window_by_ticker
-                .reduce(|_key, input, output: &mut Vec<((Decimal, Decimal), i32)>| {
-                    let value_total: Decimal = input
-                        .iter()
-                        .map(|&(trade, _)| trade.price() * trade.volume())
-                        .sum();
-                    let volume_total: Decimal =
-                        input.iter().map(|&(trade, _)| trade.volume()).sum();
-
-                    output.push(((value_total / volume_total, volume_total), 1))
+            let value = trades_by_window_by_ticker
+                .explode(|(key, trade)| Some((key, trade.price() * trade.volume())))
+                .consolidate()
+                .reduce(|_key, input, output| {
+                    output.extend(input.iter().map(|&(ticker, value)| ((*ticker, value), 1)))
                 })
-                .probe_with(&mut probe)
-                .inspect(move |(((agg_timestamp, ticker), data), ts, diff)| {
+                .map(|(ticker, (agg_timestamp, value))| ((ticker, agg_timestamp), value));
+
+            let volume = trades_by_window_by_ticker
+                .explode(|(key, trade)| Some((key, trade.volume())))
+                .consolidate()
+                .reduce(|_key, input, output| {
+                    output.extend(input.iter().map(|&(ticker, volume)| ((*ticker, volume), 1)))
+                })
+                .map(|(ticker, (agg_timestamp, volume))| ((ticker, agg_timestamp), volume));
+
+            let value_and_volume = value.join(&volume);
+            let vwap_and_volume =
+                value_and_volume.map(|(key, (value, volume))| (key, (value / volume, volume)));
+
+            vwap_and_volume.probe_with(&mut probe).inspect(
+                move |(((ticker, agg_timestamp), data), ts, diff)| {
                     if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
-                        tx.send(((*agg_timestamp, ticker.clone()), *data))
+                        tx.send(((ticker.clone(), *agg_timestamp), *data))
                             .expect("couldn't send");
                     }
-                });
+                },
+            );
         });
 
         loop {

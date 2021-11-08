@@ -1,4 +1,5 @@
 use std::{
+    fmt::{Display, LowerExp},
     iter::Sum,
     ops::{Add, AddAssign, Div, Mul, Neg},
 };
@@ -54,7 +55,19 @@ pub struct Action {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Decimal(rust_decimal::Decimal);
+pub struct Decimal(pub rust_decimal::Decimal);
+
+impl Display for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::result::Result<(), std::fmt::Error> {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl LowerExp for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::LowerExp::fmt(&self.0, f)
+    }
+}
 
 impl Add for Decimal {
     type Output = Self;
@@ -73,6 +86,13 @@ impl Mul for Decimal {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
         Decimal(self.0 * rhs.0)
+    }
+}
+
+impl Mul<isize> for Decimal {
+    type Output = Self;
+    fn mul(self, rhs: isize) -> Decimal {
+        self * Decimal(rust_decimal::Decimal::new(rhs as i64, 0))
     }
 }
 
