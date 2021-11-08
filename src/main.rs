@@ -47,7 +47,6 @@ fn main() -> Result<(), MainError> {
         },
     )?;
 
-    // Create an unbounded channel.
     let (tx, rx) = crossbeam::channel::bounded(1000);
 
     spawn(move || loop {
