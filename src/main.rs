@@ -9,9 +9,7 @@ use std::{
 
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{
-    iterate::SemigroupVariable, Consolidate, Count, Join, Reduce,
-};
+use differential_dataflow::operators::{iterate::Variable, Consolidate, Count, Join, Reduce};
 
 use rust_lib_aggs::ws::{self, Trade};
 
@@ -114,7 +112,7 @@ fn main() -> Result<(), MainError> {
 
         worker.dataflow(|scope| {
             const RETENTION: Duration = Duration::from_secs(15 * 60);
-            let trades_old = SemigroupVariable::new(scope, RETENTION);
+            let trades_old = Variable::new(scope, RETENTION);
 
             let trades = input
                 .to_collection(scope)
