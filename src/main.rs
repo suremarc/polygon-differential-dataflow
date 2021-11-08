@@ -9,7 +9,9 @@ use std::{
 
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Join, Reduce};
+use differential_dataflow::operators::{
+    iterate::SemigroupVariable, Consolidate, Count, Join, Reduce,
+};
 
 use rust_lib_aggs::ws::{self, Trade};
 
@@ -82,11 +84,18 @@ fn main() -> Result<(), MainError> {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        aggs.retain(|(ticker, agg_timestamp), (vwap, volume)| {
+        aggs.retain(|(ticker, agg_timestamp), (value, volume, count)| {
             let expired =
                 Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
             if expired {
-                println!("{} - {}: {}, {}", agg_timestamp, ticker, *vwap, *volume,);
+                println!(
+                    "{} - {}: {}, {}, {}",
+                    agg_timestamp,
+                    ticker,
+                    *value / *volume,
+                    *volume,
+                    count
+                );
             }
 
             !expired
@@ -128,7 +137,11 @@ fn main() -> Result<(), MainError> {
                 .explode(|(key, trade)| Some((key, trade.price() * trade.volume())))
                 .consolidate()
                 .reduce(|_key, input, output| {
-                    output.extend(input.iter().map(|&(ticker, value)| ((*ticker, value), 1)))
+                    output.extend(
+                        input
+                            .iter()
+                            .map(|&(ticker, value)| ((*ticker, value), 1_isize)),
+                    )
                 })
                 .map(|(ticker, (agg_timestamp, value))| ((ticker, agg_timestamp), value));
 
@@ -136,15 +149,20 @@ fn main() -> Result<(), MainError> {
                 .explode(|(key, trade)| Some((key, trade.volume())))
                 .consolidate()
                 .reduce(|_key, input, output| {
-                    output.extend(input.iter().map(|&(ticker, volume)| ((*ticker, volume), 1)))
+                    output.extend(
+                        input
+                            .iter()
+                            .map(|&(ticker, volume)| ((*ticker, volume), 1_isize)),
+                    )
                 })
                 .map(|(ticker, (agg_timestamp, volume))| ((ticker, agg_timestamp), volume));
 
-            let value_and_volume = value.join(&volume);
-            let vwap_and_volume =
-                value_and_volume.map(|(key, (value, volume))| (key, (value / volume, volume)));
+            let value_and_volume_and_count = value
+                .join(&volume)
+                .join(&trades_by_window_by_ticker.map(|(key, _trade)| key).count())
+                .map(|(key, ((vwap, volume), count))| (key, (vwap, volume, count)));
 
-            vwap_and_volume.probe_with(&mut probe).inspect(
+            value_and_volume_and_count.probe_with(&mut probe).inspect(
                 move |(((ticker, agg_timestamp), data), ts, diff)| {
                     if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
                         tx.send(((ticker.clone(), *agg_timestamp), *data))
