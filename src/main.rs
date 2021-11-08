@@ -11,8 +11,6 @@ use tungstenite::{connect, Message};
 
 use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Reduce};
 
-use keyed_priority_queue::KeyedPriorityQueue;
-
 use rust_lib_aggs::ws::{self, Decimal, Trade};
 
 #[derive(thiserror::Error, Debug)]
@@ -68,17 +66,17 @@ fn main() -> Result<(), MainError> {
         }
     });
 
-    const BAR_LENGTH: Duration = Duration::from_secs(30);
+    const BAR_LENGTH: Duration = Duration::from_secs(1);
 
     let (aggs_tx, aggs_rx) = std::sync::mpsc::channel::<((i64, String), Decimal)>();
     let mux = Arc::new(Mutex::new(aggs_tx));
 
-    let mut pq = KeyedPriorityQueue::<_, _>::new();
+    let mut aggs = std::collections::BTreeMap::new();
 
     spawn(move || loop {
-        for ((agg_timestamp, ticker), value) in aggs_rx.try_iter() {
+        for (key, value) in aggs_rx.try_iter() {
             // println!("insert: {:?}", ((agg_timestamp, ticker.clone()), value));
-            pq.push(ticker, (agg_timestamp, value));
+            aggs.insert(key, value);
         }
 
         let start = SystemTime::now();
@@ -86,31 +84,30 @@ fn main() -> Result<(), MainError> {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        while let Some((ticker, &(agg_timestamp, vwap))) = pq.peek() {
-            // println!("{}", agg_timestamp);
-            if Duration::from_millis(agg_timestamp as u64) + BAR_LENGTH < since_the_epoch {
+        aggs.retain(|(agg_timestamp, ticker), vwap| {
+            let expired =
+                Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
+            if expired {
                 println!("{:?}", (ticker, agg_timestamp, vwap));
-            } else {
-                break;
             }
 
-            pq.pop();
-        }
+            !expired
+        });
     });
 
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
         let mut input = differential_dataflow::input::InputSession::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
+        let tx;
+        {
+            let guard = mux.lock();
+            tx = guard.unwrap().clone();
+        }
+
         worker.dataflow(|scope| {
             const RETENTION: Duration = Duration::from_secs(15 * 60);
             let retractions = SemigroupVariable::new(scope, RETENTION);
-
-            let tx;
-            {
-                let guard = mux.lock();
-                tx = guard.unwrap().clone();
-            }
 
             let trades = input
                 .to_collection(scope)
