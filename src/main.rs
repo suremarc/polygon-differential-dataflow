@@ -84,10 +84,7 @@ fn main() -> Result<(), MainError> {
             let expired =
                 Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
             if expired {
-                println!(
-                    "{} - {}: {:.2e}, {:.2e}",
-                    agg_timestamp, ticker, *vwap, *volume
-                );
+                println!("{} - {}: {}, {}", agg_timestamp, ticker, *vwap, *volume,);
             }
 
             !expired
