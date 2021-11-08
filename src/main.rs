@@ -66,9 +66,9 @@ fn main() -> Result<(), MainError> {
         }
     });
 
-    const BAR_LENGTH: Duration = Duration::from_secs(1);
+    const BAR_LENGTH: Duration = Duration::from_secs(60);
 
-    let (aggs_tx, aggs_rx) = std::sync::mpsc::channel::<((i64, String), Decimal)>();
+    let (aggs_tx, aggs_rx) = std::sync::mpsc::channel();
     let mux = Arc::new(Mutex::new(aggs_tx));
 
     let mut aggs = std::collections::BTreeMap::new();
@@ -81,11 +81,11 @@ fn main() -> Result<(), MainError> {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        aggs.retain(|(agg_timestamp, ticker), vwap| {
+        aggs.retain(|(agg_timestamp, ticker), stats| {
             let expired =
                 Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
             if expired {
-                println!("{:?}", (ticker, agg_timestamp, vwap));
+                println!("{:?}", (ticker, agg_timestamp, stats));
             }
 
             !expired
@@ -124,7 +124,7 @@ fn main() -> Result<(), MainError> {
                 .map(|(agg_timestamp, trade)| ((agg_timestamp, trade.ticker()), trade));
 
             trades_by_window_by_ticker
-                .reduce(|_key, input, output: &mut Vec<(Decimal, i32)>| {
+                .reduce(|_key, input, output: &mut Vec<((Decimal, Decimal), i32)>| {
                     let value_total: Decimal = input
                         .iter()
                         .map(|&(trade, _)| trade.price() * trade.volume())
@@ -132,12 +132,12 @@ fn main() -> Result<(), MainError> {
                     let volume_total: Decimal =
                         input.iter().map(|&(trade, _)| trade.volume()).sum();
 
-                    output.push((value_total / volume_total, 1))
+                    output.push(((value_total / volume_total, volume_total), 1))
                 })
                 .probe_with(&mut probe)
-                .inspect(move |(((agg_timestamp, ticker), count), ts, diff)| {
+                .inspect(move |(((agg_timestamp, ticker), data), ts, diff)| {
                     if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
-                        tx.send(((*agg_timestamp, ticker.clone()), *count))
+                        tx.send(((*agg_timestamp, ticker.clone()), *data))
                             .expect("couldn't send");
                     }
                 });
@@ -155,7 +155,9 @@ fn main() -> Result<(), MainError> {
             }
 
             input.flush();
-            worker.step();
+            while probe.less_than(input.time()) {
+                worker.step();
+            }
         }
     })
     .expect("Computation terminated abnormally");
