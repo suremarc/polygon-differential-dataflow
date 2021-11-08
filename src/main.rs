@@ -74,10 +74,7 @@ fn main() -> Result<(), MainError> {
     let mut aggs = std::collections::BTreeMap::new();
 
     spawn(move || loop {
-        for (key, value) in aggs_rx.try_iter() {
-            // println!("insert: {:?}", ((agg_timestamp, ticker.clone()), value));
-            aggs.insert(key, value);
-        }
+        aggs.extend(aggs_rx.try_iter());
 
         let start = SystemTime::now();
         let since_the_epoch = start
