@@ -110,14 +110,14 @@ fn main() -> Result<(), MainError> {
                 .concat(&trades_old.negate())
                 .consolidate();
 
+            // Feed these trades forward so that they get retracted once RETENTION has passed
+            trades_old.set(&trades);
+
             let trades_by_window = trades.map(|trade: MyTrade| {
                 let agg_timestamp =
                     trade.timestamp() - trade.timestamp() % (BAR_LENGTH.as_millis() as i64);
                 (agg_timestamp, trade)
             });
-
-            let trades_recent = trades_by_window.map(|(_, trade)| trade);
-            trades_old.set(&trades_recent);
 
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((agg_timestamp, trade.ticker()), trade));
