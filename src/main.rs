@@ -75,6 +75,8 @@ fn main() -> Result<(), MainError> {
     spawn(move || loop {
         aggs.extend(aggs_rx.try_iter());
 
+        std::thread::sleep(Duration::from_millis(100));
+
         let start = SystemTime::now();
         let since_the_epoch = start
             .duration_since(UNIX_EPOCH)
@@ -152,16 +154,14 @@ fn main() -> Result<(), MainError> {
             );
         });
 
-        loop {
-            for trade in rx.try_iter() {
-                let ts_unix = Duration::from_millis(trade.timestamp() as u64);
-                if ts_unix > *input.time() {
-                    input.advance_to(ts_unix);
-                }
-
-                // println!("{:?}", trade);
-                input.insert(trade);
+        for trade in rx.iter() {
+            let ts_unix = Duration::from_millis(trade.timestamp() as u64);
+            if ts_unix > *input.time() {
+                input.advance_to(ts_unix);
             }
+
+            // println!("{:?}", trade);
+            input.insert(trade);
 
             input.flush();
             while probe.less_than(input.time()) {
