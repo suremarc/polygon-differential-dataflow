@@ -103,11 +103,11 @@ fn main() -> Result<(), MainError> {
 
         worker.dataflow(|scope| {
             const RETENTION: Duration = Duration::from_secs(15 * 60);
-            let retractions = SemigroupVariable::new(scope, RETENTION);
+            let trades_old = SemigroupVariable::new(scope, RETENTION);
 
             let trades = input
                 .to_collection(scope)
-                .concat(&retractions)
+                .concat(&trades_old.negate())
                 .consolidate();
 
             let trades_by_window = trades.map(|trade: MyTrade| {
@@ -117,7 +117,7 @@ fn main() -> Result<(), MainError> {
             });
 
             let trades_recent = trades_by_window.map(|(_, trade)| trade);
-            retractions.set(&trades_recent.negate());
+            trades_old.set(&trades_recent);
 
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((agg_timestamp, trade.ticker()), trade));
