@@ -136,6 +136,9 @@ impl Monoid for Decimal {
 impl Abomonation for Decimal {}
 
 pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
+    const SOCKET_PATH: &'static str;
+    const FEED_PREFIX: &'static str;
+
     fn ticker(&self) -> String;
     fn price(&self) -> Decimal;
     fn volume(&self) -> Decimal;
@@ -162,6 +165,9 @@ fn default_c() -> tinyvec::ArrayVec<[u32; 6]> {
 }
 
 impl Trade for StockTrade {
+    const SOCKET_PATH: &'static str = "stocks";
+    const FEED_PREFIX: &'static str = "T";
+
     fn ticker(&self) -> String {
         String::from(self.sym.as_str())
     }
@@ -193,6 +199,9 @@ pub struct CryptoTrade {
 impl Abomonation for CryptoTrade {}
 
 impl Trade for CryptoTrade {
+    const SOCKET_PATH: &'static str = "crypto";
+    const FEED_PREFIX: &'static str = "XT";
+
     fn ticker(&self) -> String {
         String::from(self.pair.as_str())
     }

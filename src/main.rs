@@ -134,8 +134,8 @@ fn main() -> Result<(), MainError> {
 }
 
 fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
-    let url =
-        url::Url::parse("wss://socket.polygon.io/crypto").expect("hardcoded url should be valid");
+    let url = url::Url::parse(format!("wss://socket.polygon.io/{}", MyTrade::SOCKET_PATH).as_str())
+        .expect("hardcoded url should be valid");
 
     let (mut socket, _) = connect(url).expect("Failed to connect");
     println!("WebSocket handshake has been successfully completed");
@@ -151,7 +151,11 @@ fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
         &mut socket,
         &ws::Action {
             action: ws::ActionType::Subscribe,
-            params: format!("XT.{}", std::env::args().nth(1).unwrap()),
+            params: format!(
+                "{}.{}",
+                MyTrade::FEED_PREFIX,
+                std::env::args().nth(1).unwrap()
+            ),
         },
     )?;
 
