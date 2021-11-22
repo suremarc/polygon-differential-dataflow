@@ -7,11 +7,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crossbeam::channel::Receiver;
 use tungstenite::{connect, Message};
 
 use differential_dataflow::operators::{iterate::Variable, Consolidate, Count, Join, Reduce};
 
-use rust_lib_aggs::ws::{self, Trade};
+use rust_lib_aggs::ws::{self, Decimal, Trade};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -23,108 +24,41 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type MyTrade = ws::StockTrade;
+type MyTrade = ws::CryptoTrade;
+
+type AggKey = (String, i64);
+type Stats = (Decimal, Decimal, isize);
+
+const BAR_LENGTH: Duration = Duration::from_secs(1);
+const RETENTION: Duration = Duration::from_secs(15);
 
 fn main() -> Result<(), MainError> {
-    let url =
-        url::Url::parse("wss://socket.polygon.io/crypto").expect("hardcoded url should be valid");
+    let rx = trades_feed()?;
 
-    let (mut socket, _) = connect(url).expect("Failed to connect");
-    println!("WebSocket handshake has been successfully completed");
-
-    try_send_payload(
-        &mut socket,
-        &ws::Action {
-            action: ws::ActionType::Auth,
-            params: env!("API_KEY").to_string(),
-        },
-    )?;
-    try_send_payload(
-        &mut socket,
-        &ws::Action {
-            action: ws::ActionType::Subscribe,
-            params: format!("XT.{}", std::env::args().nth(1).unwrap()),
-        },
-    )?;
-
-    let (tx, rx) = crossbeam::channel::bounded(1000);
-
-    spawn(move || loop {
-        if let Message::Text(data) = socket.read_message().unwrap() {
-            let messages: Vec<ws::Message<MyTrade>> = serde_json::from_str(data.as_str()).unwrap();
-            for message in messages.iter() {
-                if let ws::Message::Trade(trade) = message {
-                    tx.send(*trade).unwrap();
-                } else {
-                    println!(
-                        "{}",
-                        serde_json::to_string(message).expect("failed to serialize Message")
-                    )
-                }
-            }
-        }
-    });
-
-    const BAR_LENGTH: Duration = Duration::from_secs(1);
-
-    let (aggs_tx, aggs_rx) = std::sync::mpsc::channel();
+    let (aggs_tx, aggs_rx) = std::sync::mpsc::sync_channel(10_000);
     let mux = Arc::new(Mutex::new(aggs_tx));
 
-    let mut aggs = std::collections::BTreeMap::new();
+    spawn(aggs_loop(aggs_rx));
 
-    spawn(move || loop {
-        aggs.extend(aggs_rx.try_iter());
-
-        std::thread::sleep(Duration::from_millis(50));
-
-        let start = SystemTime::now();
-        let since_the_epoch = start
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards");
-
-        aggs.retain(|(ticker, agg_timestamp), (value, volume, count)| {
-            let expired =
-                Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
-            if expired {
-                println!(
-                    "{} - {}: {}, {}, {}",
-                    agg_timestamp,
-                    ticker,
-                    *value / *volume,
-                    *volume,
-                    count
-                );
-            }
-
-            !expired
-        });
-    });
+    println!("{:#?}", std::env::args());
 
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
         let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
-        let tx;
+        let aggs_tx;
         {
             let guard = mux.lock();
-            tx = guard.unwrap().clone();
+            aggs_tx = guard.unwrap().clone();
         }
 
         worker.dataflow(|scope| {
-            const RETENTION: Duration = Duration::from_secs(15 * 60);
-            let trades_old = Variable::new(scope, RETENTION);
+            let trades_old = Variable::new(scope, 2 * RETENTION + BAR_LENGTH);
 
             let trades = input
                 .to_collection(scope)
                 .concat(&trades_old.negate())
                 .consolidate();
-            // trades
-            //     .map(|_| ())
-            //     .consolidate()
-            //     .probe_with(&mut probe)
-            //     .inspect(|(_, _, count)| {
-            //         println!("total trades: {}", count);
-            //     });
 
             // Feed these trades forward so that they get retracted once RETENTION has passed
             trades_old.set(&trades);
@@ -170,7 +104,8 @@ fn main() -> Result<(), MainError> {
             value_and_volume_and_count.probe_with(&mut probe).inspect(
                 move |(((ticker, agg_timestamp), data), ts, diff)| {
                     if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
-                        tx.send(((ticker.clone(), *agg_timestamp), *data))
+                        aggs_tx
+                            .send(((ticker.clone(), *agg_timestamp), *data))
                             .expect("couldn't send");
                     }
                 },
@@ -178,12 +113,13 @@ fn main() -> Result<(), MainError> {
         });
 
         for trade in rx.iter() {
-            let ts_unix = Duration::from_millis(trade.timestamp() as u64);
-            if ts_unix > *input.time() {
-                input.advance_to(ts_unix);
-            }
+            let start = SystemTime::now();
+            let since_the_epoch = start
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards");
 
-            // println!("{:?}", trade);
+            input.advance_to(since_the_epoch);
+
             input.insert(trade);
 
             input.flush();
@@ -197,10 +133,85 @@ fn main() -> Result<(), MainError> {
     Ok(())
 }
 
+fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
+    let url =
+        url::Url::parse("wss://socket.polygon.io/crypto").expect("hardcoded url should be valid");
+
+    let (mut socket, _) = connect(url).expect("Failed to connect");
+    println!("WebSocket handshake has been successfully completed");
+
+    try_send_payload(
+        &mut socket,
+        &ws::Action {
+            action: ws::ActionType::Auth,
+            params: env!("API_KEY").to_string(),
+        },
+    )?;
+    try_send_payload(
+        &mut socket,
+        &ws::Action {
+            action: ws::ActionType::Subscribe,
+            params: format!("XT.{}", std::env::args().nth(1).unwrap()),
+        },
+    )?;
+
+    let (tx, rx) = crossbeam::channel::bounded(10_000);
+
+    spawn(move || loop {
+        if let Message::Text(data) = socket.read_message().unwrap() {
+            let messages: Vec<ws::Message<MyTrade>> = serde_json::from_str(data.as_str()).unwrap();
+            for message in messages.iter() {
+                if let ws::Message::Trade(trade) = message {
+                    tx.send(*trade).unwrap();
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string(message).expect("failed to serialize Message")
+                    )
+                }
+            }
+        }
+    });
+
+    Ok(rx)
+}
+
 fn try_send_payload<T: std::io::Write + std::io::Read>(
     socket: &mut tungstenite::WebSocket<T>,
     payload: &impl serde::Serialize,
 ) -> Result<(), MainError> {
     let msg = Message::Text(serde_json::to_string(payload)?);
     socket.write_message(msg).map_err(MainError::Write)
+}
+
+fn aggs_loop(rx: std::sync::mpsc::Receiver<(AggKey, Stats)>) -> impl FnOnce() {
+    let mut aggs = std::collections::BTreeMap::new();
+
+    move || loop {
+        aggs.extend(rx.try_iter());
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let start = SystemTime::now();
+        let since_the_epoch = start
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards");
+
+        aggs.retain(|(ticker, agg_timestamp), (value, volume, count)| {
+            let expired =
+                Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
+            if expired {
+                println!(
+                    "{} - {}: {}, {}, {}",
+                    agg_timestamp,
+                    ticker,
+                    *value / *volume,
+                    *volume,
+                    count
+                );
+            }
+
+            !expired
+        });
+    }
 }
