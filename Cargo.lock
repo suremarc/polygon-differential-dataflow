@@ -442,16 +442,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moniclock"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecbbef128c1c04063315dfad268114f981e3034bd75917225a84870d58c45c65"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -649,7 +639,6 @@ dependencies = [
  "crossbeam",
  "differential-dataflow",
  "futures",
- "moniclock",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

@@ -31,7 +31,7 @@ type MyTrade = ws::CryptoTrade;
 type AggKey = (String, i64);
 type Stats = (Decimal, Decimal, isize);
 
-const BAR_LENGTH: Duration = Duration::from_secs(1);
+const BAR_LENGTH: Duration = Duration::from_secs(30);
 const RETENTION: Duration = Duration::from_secs(900);
 
 fn truncate(dur: Duration, inc: Duration) -> Duration {
@@ -127,10 +127,10 @@ fn main() -> Result<(), MainError> {
             if Instant::now().duration_since(last_flush) > Duration::from_millis(25) {
                 input.flush();
                 last_flush = Instant::now();
-            }
 
-            while probe.less_than(input.time()) {
-                worker.step();
+                while probe.less_than(input.time()) {
+                    worker.step();
+                }
             }
         }
     })
