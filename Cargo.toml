@@ -30,6 +30,3 @@ rust_decimal_macros = "1.16"
 crossbeam = "0.8.1"
 
 moniclock = "0.1.0"
-
-[profile.release]
-debug = true

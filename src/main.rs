@@ -32,7 +32,7 @@ type AggKey = (String, i64);
 type Stats = (Decimal, Decimal, isize);
 
 const BAR_LENGTH: Duration = Duration::from_secs(1);
-const RETENTION: Duration = Duration::from_secs(15);
+const RETENTION: Duration = Duration::from_secs(900);
 
 fn truncate(dur: Duration, inc: Duration) -> Duration {
     Duration::from_nanos((dur.as_nanos() / inc.as_nanos() * inc.as_nanos()) as u64)
@@ -45,13 +45,6 @@ fn main() -> Result<(), MainError> {
     let mux = Arc::new(Mutex::new(aggs_tx));
 
     spawn(aggs_loop(aggs_rx));
-
-    println!("{:#?}", std::env::args());
-
-    let t_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards");
-    let t0 = Instant::now();
 
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
         let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
@@ -68,12 +61,6 @@ fn main() -> Result<(), MainError> {
 
             let trades = input.to_collection(scope);
             let trades_recent = trades.concat(&trades_old.negate()).consolidate();
-
-            // trades_recent
-            //     .map(|_| 0)
-            //     .count()
-            //     .probe_with(&mut probe)
-            //     .inspect(|data| println!("{:#?}", data.0 .1));
 
             // Feed input trades forward so that they get retracted once RETENTION has passed
             trades_old.set(&trades);
@@ -126,13 +113,22 @@ fn main() -> Result<(), MainError> {
             );
         });
 
+        let mut last_flush = Instant::now();
+
         for trade in rx.iter() {
-            input.advance_to(t_unix + t0.elapsed());
+            let ts_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards");
+            input.advance_to(ts_unix);
             // println!("{:#?}", input.time());
 
             input.insert(trade);
 
-            input.flush();
+            if Instant::now().duration_since(last_flush) > Duration::from_millis(25) {
+                input.flush();
+                last_flush = Instant::now();
+            }
+
             while probe.less_than(input.time()) {
                 worker.step();
             }
