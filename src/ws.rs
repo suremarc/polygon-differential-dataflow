@@ -2,9 +2,9 @@ use std::{
     fmt::{Display, LowerExp},
     iter::Sum,
     ops::{Add, AddAssign, Div, Mul, Neg},
+    time::Duration,
 };
 
-use abomonation::Abomonation;
 use differential_dataflow::difference::{Monoid, Semigroup};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -133,8 +133,6 @@ impl Monoid for Decimal {
     }
 }
 
-impl Abomonation for Decimal {}
-
 pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
     const SOCKET_PATH: &'static str;
     const FEED_PREFIX: &'static str;
@@ -142,13 +140,13 @@ pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
     fn ticker(&self) -> String;
     fn price(&self) -> Decimal;
     fn volume(&self) -> Decimal;
-    fn timestamp(&self) -> i64;
+    fn timestamp(&self) -> Duration;
     fn exchange(&self) -> u32;
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StockTrade {
-    pub t: i64,
+    pub t: u64,
     pub sym: arrayvec::ArrayString<8>,
     pub x: u32,
     pub z: Tape,
@@ -157,8 +155,6 @@ pub struct StockTrade {
     #[serde(default = "default_c")]
     pub c: tinyvec::ArrayVec<[u32; 6]>,
 }
-
-impl Abomonation for StockTrade {}
 
 fn default_c() -> tinyvec::ArrayVec<[u32; 6]> {
     tinyvec::array_vec!([u32; 6])
@@ -177,8 +173,8 @@ impl Trade for StockTrade {
     fn volume(&self) -> Decimal {
         Decimal(rust_decimal::Decimal::new(self.s as i64, 0))
     }
-    fn timestamp(&self) -> i64 {
-        self.t
+    fn timestamp(&self) -> Duration {
+        Duration::from_nanos(self.t)
     }
     fn exchange(&self) -> u32 {
         self.x
@@ -187,7 +183,7 @@ impl Trade for StockTrade {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CryptoTrade {
-    pub t: i64,
+    pub t: u64,
     pub pair: arrayvec::ArrayString<10>,
     pub p: Decimal,
     pub s: Decimal,
@@ -195,8 +191,6 @@ pub struct CryptoTrade {
     pub x: u32,
     pub r: u64,
 }
-
-impl Abomonation for CryptoTrade {}
 
 impl Trade for CryptoTrade {
     const SOCKET_PATH: &'static str = "crypto";
@@ -211,8 +205,8 @@ impl Trade for CryptoTrade {
     fn volume(&self) -> Decimal {
         self.s
     }
-    fn timestamp(&self) -> i64 {
-        self.t
+    fn timestamp(&self) -> Duration {
+        Duration::from_millis(self.t)
     }
     fn exchange(&self) -> u32 {
         self.x

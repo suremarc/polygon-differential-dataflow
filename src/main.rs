@@ -4,13 +4,15 @@ extern crate timely;
 use std::{
     sync::{Arc, Mutex},
     thread::spawn,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crossbeam::channel::Receiver;
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{iterate::Variable, Consolidate, Count, Join, Reduce};
+use differential_dataflow::operators::{
+    iterate::SemigroupVariable, Consolidate, Count, Join, Reduce,
+};
 
 use rust_lib_aggs::ws::{self, Decimal, Trade};
 
@@ -32,6 +34,10 @@ type Stats = (Decimal, Decimal, isize);
 const BAR_LENGTH: Duration = Duration::from_secs(1);
 const RETENTION: Duration = Duration::from_secs(15);
 
+fn truncate(dur: Duration, inc: Duration) -> Duration {
+    Duration::from_nanos((dur.as_nanos() / inc.as_nanos() * inc.as_nanos()) as u64)
+}
+
 fn main() -> Result<(), MainError> {
     let rx = trades_feed()?;
 
@@ -41,6 +47,11 @@ fn main() -> Result<(), MainError> {
     spawn(aggs_loop(aggs_rx));
 
     println!("{:#?}", std::env::args());
+
+    let t_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time went backwards");
+    let t0 = Instant::now();
 
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
         let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
@@ -53,19 +64,22 @@ fn main() -> Result<(), MainError> {
         }
 
         worker.dataflow(|scope| {
-            let trades_old = Variable::new(scope, 2 * RETENTION + BAR_LENGTH);
+            let trades_old = SemigroupVariable::new(scope, RETENTION + BAR_LENGTH);
 
-            let trades = input
-                .to_collection(scope)
-                .concat(&trades_old.negate())
-                .consolidate();
+            let trades = input.to_collection(scope);
+            let trades_recent = trades.concat(&trades_old.negate()).consolidate();
 
-            // Feed these trades forward so that they get retracted once RETENTION has passed
+            // trades_recent
+            //     .map(|_| 0)
+            //     .count()
+            //     .probe_with(&mut probe)
+            //     .inspect(|data| println!("{:#?}", data.0 .1));
+
+            // Feed input trades forward so that they get retracted once RETENTION has passed
             trades_old.set(&trades);
 
-            let trades_by_window = trades.map(|trade: MyTrade| {
-                let agg_timestamp =
-                    trade.timestamp() - trade.timestamp() % (BAR_LENGTH.as_millis() as i64);
+            let trades_by_window = trades_recent.map(|trade: MyTrade| {
+                let agg_timestamp = truncate(trade.timestamp(), BAR_LENGTH).as_millis() as i64;
                 (agg_timestamp, trade)
             });
 
@@ -113,12 +127,8 @@ fn main() -> Result<(), MainError> {
         });
 
         for trade in rx.iter() {
-            let start = SystemTime::now();
-            let since_the_epoch = start
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards");
-
-            input.advance_to(since_the_epoch);
+            input.advance_to(t_unix + t0.elapsed());
+            // println!("{:#?}", input.time());
 
             input.insert(trade);
 
