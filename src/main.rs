@@ -197,7 +197,7 @@ fn aggs_loop(rx: std::sync::mpsc::Receiver<(AggKey, Stats)>) -> impl FnOnce() {
                     ticker,
                     *value / *volume,
                     *volume,
-                    count
+                    *count
                 );
             }
 

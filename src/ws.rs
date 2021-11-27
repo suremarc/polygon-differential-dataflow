@@ -105,6 +105,13 @@ impl Div for Decimal {
     }
 }
 
+impl Div<isize> for Decimal {
+    type Output = Self;
+    fn div(self, rhs: isize) -> Self {
+        Decimal(self.0 / rust_decimal::Decimal::new(rhs as i64, 0))
+    }
+}
+
 impl Neg for Decimal {
     type Output = Self;
     fn neg(self) -> Self {
