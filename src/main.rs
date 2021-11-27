@@ -10,9 +10,7 @@ use std::{
 use crossbeam::channel::Receiver;
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{
-    iterate::SemigroupVariable, Consolidate, Count, Join, Reduce,
-};
+use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Reduce};
 
 use rust_lib_aggs::ws::{self, Decimal, Trade};
 
@@ -73,40 +71,22 @@ fn main() -> Result<(), MainError> {
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
 
-            let value = trades_by_window_by_ticker
-                .explode(|(key, trade)| Some((key, trade.price() * trade.volume())))
-                .consolidate()
-                .reduce(|_key, input, output| {
-                    output.extend(
-                        input
-                            .iter()
-                            .map(|&(ticker, value)| ((*ticker, value), 1_isize)),
-                    )
-                })
-                .map(|(ticker, (agg_timestamp, value))| ((ticker, agg_timestamp), value));
+            let stats = trades_by_window_by_ticker.reduce(|_key, input, output| {
+                let value = input
+                    .iter()
+                    .map(|&(trade, num)| trade.volume() * trade.price() * num)
+                    .sum();
+                let volume = input.iter().map(|&(trade, num)| trade.volume() * num).sum();
+                let count = input.len() as isize;
 
-            let volume = trades_by_window_by_ticker
-                .explode(|(key, trade)| Some((key, trade.volume())))
-                .consolidate()
-                .reduce(|_key, input, output| {
-                    output.extend(
-                        input
-                            .iter()
-                            .map(|&(ticker, volume)| ((*ticker, volume), 1_isize)),
-                    )
-                })
-                .map(|(ticker, (agg_timestamp, volume))| ((ticker, agg_timestamp), volume));
+                output.push(((value, volume, count), 1_isize));
+            });
 
-            let value_and_volume_and_count = value
-                .join(&volume)
-                .join(&trades_by_window_by_ticker.map(|(key, _trade)| key).count())
-                .map(|(key, ((vwap, volume), count))| (key, (vwap, volume, count)));
-
-            value_and_volume_and_count.probe_with(&mut probe).inspect(
-                move |(((ticker, agg_timestamp), data), ts, diff)| {
+            stats.probe_with(&mut probe).inspect(
+                move |(((ticker, agg_timestamp), (value, volume, count)), ts, diff)| {
                     if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
                         aggs_tx
-                            .send(((ticker.clone(), *agg_timestamp), *data))
+                            .send(((ticker.clone(), *agg_timestamp), (*value, *volume, *count)))
                             .expect("couldn't send");
                     }
                 },
