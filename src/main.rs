@@ -26,7 +26,7 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type MyTrade = ws::StockTrade;
+type MyTrade = ws::CryptoTrade;
 
 type AggKey = (String, i64);
 type Stats = (
@@ -169,7 +169,7 @@ fn main() -> Result<(), MainError> {
                 last_flush = Instant::now();
 
                 while probe.less_than(input.time()) {
-                    worker.step();
+                    worker.step_or_park(None);
                 }
             }
         }
