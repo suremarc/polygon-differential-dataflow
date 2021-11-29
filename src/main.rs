@@ -11,8 +11,8 @@ use crossbeam::channel::Receiver;
 use rust_decimal::prelude::ToPrimitive;
 use tungstenite::{connect, Message};
 
-use differential_dataflow::difference::DiffPair;
 use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Count, Join};
+use differential_dataflow::{difference::DiffPair, operators::Reduce};
 
 use rust_lib_aggs::ws::{self, Decimal, Trade};
 
@@ -29,7 +29,16 @@ pub enum MainError {
 type MyTrade = ws::CryptoTrade;
 
 type AggKey = (String, i64);
-type Stats = (Decimal, Decimal, isize, Duration);
+type Stats = (
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    isize,
+    Duration,
+);
 
 const BAR_LENGTH: Duration = Duration::from_secs(30);
 const RETENTION: Duration = Duration::from_secs(900);
@@ -73,6 +82,35 @@ fn main() -> Result<(), MainError> {
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
 
+            let ohlc = trades_by_window_by_ticker.reduce(|_key, input, output| {
+                let trades = input.iter().map(|&(trade, _num)| *trade);
+                output.push((
+                    (
+                        trades // open
+                            .clone()
+                            .min_by(|x, y| x.timestamp().cmp(&y.timestamp()))
+                            .map(|trade| trade.price())
+                            .unwrap_or_else(|| Decimal::from(0)),
+                        trades // high
+                            .clone()
+                            .max_by(|x, y| x.price().cmp(&y.price()))
+                            .map(|trade| trade.price())
+                            .unwrap_or_else(|| Decimal::from(0)),
+                        trades // low
+                            .clone()
+                            .min_by(|x, y| x.price().cmp(&y.price()))
+                            .map(|trade| trade.price())
+                            .unwrap_or_else(|| Decimal::from(0)),
+                        trades // close
+                            .clone()
+                            .max_by(|x, y| x.timestamp().cmp(&y.timestamp()))
+                            .map(|trade| trade.price())
+                            .unwrap_or_else(|| Decimal::from(0)),
+                    ),
+                    1_isize,
+                ));
+            });
+
             let value_and_volume = trades_by_window_by_ticker
                 .explode(|(key, trade)| {
                     Some((
@@ -87,11 +125,12 @@ fn main() -> Result<(), MainError> {
 
             let stats = value_and_volume
                 .join(&count)
-                .map(|(key, ((), count))| (key, count));
+                .map(|(key, ((), count))| (key, count))
+                .join(&ohlc);
 
             stats.probe_with(&mut probe).inspect(
                 move |(
-                    ((ticker, agg_timestamp), count),
+                    ((ticker, agg_timestamp), (count, (open, high, low, close))),
                     ts,
                     DiffPair {
                         element1: value,
@@ -102,7 +141,7 @@ fn main() -> Result<(), MainError> {
                         aggs_tx
                             .send((
                                 (ticker.clone(), *agg_timestamp),
-                                (*value, *volume, *count, *ts),
+                                (*open, *high, *low, *close, *value, *volume, *count, *ts),
                             ))
                             .expect("couldn't send");
                     }
@@ -204,21 +243,27 @@ fn aggs_loop(rx: std::sync::mpsc::Receiver<(AggKey, Stats)>) -> impl FnOnce() {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        aggs.retain(|(ticker, agg_timestamp), (value, volume, count, _ts)| {
-            let expired =
-                Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
-            if expired {
-                println!(
-                    "{} - {}: {:.2}, {:.3}, {}",
-                    agg_timestamp,
-                    ticker,
-                    (*value / *volume).0.to_f64().unwrap(),
-                    volume.0.to_f64().unwrap(),
-                    *count
-                );
-            }
+        aggs.retain(
+            |(ticker, agg_timestamp), (open, high, low, close, value, volume, count, _ts)| {
+                let expired =
+                    Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
+                if expired {
+                    println!(
+                        "{} - {}: open: {:.2}, high: {:.2}, low: {:.2}, close: {:.2}, vwap: {:.2}, vol: {:.3}, trades: {}",
+                        agg_timestamp,
+                        ticker,
+                        open.0.to_f64().unwrap(),
+                        high.0.to_f64().unwrap(),
+                        low.0.to_f64().unwrap(),
+                        close.0.to_f64().unwrap(),
+                        (*value / *volume).0.to_f64().unwrap(),
+                        volume.0.to_f64().unwrap(),
+                        *count
+                    );
+                }
 
-            !expired
-        });
+                !expired
+            },
+        );
     }
 }
