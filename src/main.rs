@@ -26,7 +26,7 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type MyTrade = ws::CryptoTrade;
+type MyTrade = ws::StockTrade;
 
 type AggKey = (String, i64);
 type Stats = (
@@ -93,13 +93,13 @@ fn main() -> Result<(), MainError> {
                             .unwrap_or_else(|| Decimal::from(0)),
                         trades // high
                             .clone()
-                            .max_by(|x, y| x.price().cmp(&y.price()))
                             .map(|trade| trade.price())
+                            .max()
                             .unwrap_or_else(|| Decimal::from(0)),
                         trades // low
                             .clone()
-                            .min_by(|x, y| x.price().cmp(&y.price()))
                             .map(|trade| trade.price())
+                            .min()
                             .unwrap_or_else(|| Decimal::from(0)),
                         trades // close
                             .clone()
