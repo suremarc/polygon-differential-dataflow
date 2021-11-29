@@ -71,6 +71,12 @@ impl LowerExp for Decimal {
     }
 }
 
+impl From<isize> for Decimal {
+    fn from(x: isize) -> Self {
+        Decimal(rust_decimal::Decimal::new(x as i64, 0))
+    }
+}
+
 impl Add for Decimal {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
@@ -95,6 +101,13 @@ impl Mul<isize> for Decimal {
     type Output = Self;
     fn mul(self, rhs: isize) -> Decimal {
         self * Decimal(rust_decimal::Decimal::new(rhs as i64, 0))
+    }
+}
+
+impl Mul<Decimal> for isize {
+    type Output = Decimal;
+    fn mul(self, rhs: Decimal) -> Decimal {
+        rhs * Decimal(rust_decimal::Decimal::new(self as i64, 0))
     }
 }
 

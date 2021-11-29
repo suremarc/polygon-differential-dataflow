@@ -10,7 +10,8 @@ use std::{
 use crossbeam::channel::Receiver;
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Reduce};
+use differential_dataflow::difference::DiffPair;
+use differential_dataflow::operators::{iterate::SemigroupVariable, Consolidate, Count, Join};
 
 use rust_lib_aggs::ws::{self, Decimal, Trade};
 
@@ -27,7 +28,7 @@ pub enum MainError {
 type MyTrade = ws::CryptoTrade;
 
 type AggKey = (String, i64);
-type Stats = (Decimal, Decimal, isize);
+type Stats = (Decimal, Decimal, isize, Duration);
 
 const BAR_LENGTH: Duration = Duration::from_secs(30);
 const RETENTION: Duration = Duration::from_secs(900);
@@ -71,22 +72,47 @@ fn main() -> Result<(), MainError> {
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
 
-            let stats = trades_by_window_by_ticker.reduce(|_key, input, output| {
-                let value = input
-                    .iter()
-                    .map(|&(trade, num)| trade.volume() * trade.price() * num)
-                    .sum();
-                let volume = input.iter().map(|&(trade, num)| trade.volume() * num).sum();
-                let count = input.len() as isize;
+            let value_and_volume = trades_by_window_by_ticker
+                .explode(|(key, trade)| {
+                    Some((
+                        key,
+                        DiffPair::new(trade.price() * trade.volume(), trade.volume()),
+                    ))
+                })
+                .consolidate()
+                .map(|data| (data, ()));
 
-                output.push(((value, volume, count), 1_isize));
-            });
+            let count = trades_by_window_by_ticker.map(|(key, _trade)| key).count();
+            // let stats = trades_by_window_by_ticker.reduce(|_key, input, output| {
+            //     let value = input
+            //         .iter()
+            //         .map(|&(trade, num)| trade.volume() * trade.price() * num)
+            //         .sum();
+            //     let volume = input.iter().map(|&(trade, num)| trade.volume() * num).sum();
+            //     let count = input.len() as isize;
+
+            //     output.push(((value, volume, count), 1_isize));
+            // });
+
+            let stats = value_and_volume
+                .join(&count)
+                .map(|(key, ((), count))| (key, count));
 
             stats.probe_with(&mut probe).inspect(
-                move |(((ticker, agg_timestamp), (value, volume, count)), ts, diff)| {
-                    if *diff > 0 && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
+                move |(
+                    ((ticker, agg_timestamp), count),
+                    ts,
+                    DiffPair {
+                        element1: value,
+                        element2: volume,
+                    },
+                )| {
+                    if Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
                         aggs_tx
-                            .send(((ticker.clone(), *agg_timestamp), (*value, *volume, *count)))
+                            .send((
+                                (ticker.clone(), *agg_timestamp),
+                                (*value, *volume, *count, *ts),
+                            ))
                             .expect("couldn't send");
                     }
                 },
@@ -187,17 +213,18 @@ fn aggs_loop(rx: std::sync::mpsc::Receiver<(AggKey, Stats)>) -> impl FnOnce() {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        aggs.retain(|(ticker, agg_timestamp), (value, volume, count)| {
+        aggs.retain(|(ticker, agg_timestamp), (value, volume, count, ts)| {
             let expired =
                 Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
             if expired {
                 println!(
-                    "{} - {}: {}, {}, {}",
+                    "{} - {}: {}, {}, {}, {:?}",
                     agg_timestamp,
                     ticker,
                     *value / *volume,
                     *volume,
-                    *count
+                    *count,
+                    *ts
                 );
             }
 
