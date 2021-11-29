@@ -194,7 +194,7 @@ impl Trade for StockTrade {
         Decimal(rust_decimal::Decimal::new(self.s as i64, 0))
     }
     fn timestamp(&self) -> Duration {
-        Duration::from_nanos(self.t)
+        Duration::from_millis(self.t)
     }
     fn exchange(&self) -> u32 {
         self.x

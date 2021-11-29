@@ -26,7 +26,7 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type MyTrade = ws::CryptoTrade;
+type MyTrade = ws::StockTrade;
 
 type AggKey = (String, i64);
 type Stats = (
@@ -73,10 +73,6 @@ fn main() -> Result<(), MainError> {
 
             // Feed input trades forward so that they get retracted once RETENTION has passed
             trades_old.set(&trades);
-
-            // trades
-            //     .probe_with(&mut probe)
-            //     .inspect(|data| println!("{:?}", data));
 
             let trades_by_window = trades_recent.map(|trade: MyTrade| {
                 let agg_timestamp = truncate(trade.timestamp(), BAR_LENGTH).as_millis() as i64;
