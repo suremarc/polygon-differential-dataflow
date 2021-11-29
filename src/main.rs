@@ -83,16 +83,6 @@ fn main() -> Result<(), MainError> {
                 .map(|data| (data, ()));
 
             let count = trades_by_window_by_ticker.map(|(key, _trade)| key).count();
-            // let stats = trades_by_window_by_ticker.reduce(|_key, input, output| {
-            //     let value = input
-            //         .iter()
-            //         .map(|&(trade, num)| trade.volume() * trade.price() * num)
-            //         .sum();
-            //     let volume = input.iter().map(|&(trade, num)| trade.volume() * num).sum();
-            //     let count = input.len() as isize;
-
-            //     output.push(((value, volume, count), 1_isize));
-            // });
 
             let stats = value_and_volume
                 .join(&count)
