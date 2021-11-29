@@ -26,7 +26,7 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type MyTrade = ws::StockTrade;
+type MyTrade = ws::CryptoTrade;
 
 type AggKey = (String, i64);
 type Stats = (
@@ -74,6 +74,10 @@ fn main() -> Result<(), MainError> {
             // Feed input trades forward so that they get retracted once RETENTION has passed
             trades_old.set(&trades);
 
+            // trades
+            //     .probe_with(&mut probe)
+            //     .inspect(|data| println!("{:?}", data));
+
             let trades_by_window = trades_recent.map(|trade: MyTrade| {
                 let agg_timestamp = truncate(trade.timestamp(), BAR_LENGTH).as_millis() as i64;
                 (agg_timestamp, trade)
@@ -82,34 +86,35 @@ fn main() -> Result<(), MainError> {
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
 
-            let ohlc = trades_by_window_by_ticker.reduce(|_key, input, output| {
-                let trades = input.iter().map(|&(trade, _num)| *trade);
+            let prices_by_timestamp = trades_by_window_by_ticker
+                .map(|(key, trade)| (key, (trade.timestamp(), trade.price())));
+            let prices = trades_by_window_by_ticker.map(|(key, trade)| (key, trade.price()));
+
+            let open_close = prices_by_timestamp.reduce(|_key, input, output| {
+                let values = input.iter().map(|&((_ts, price), _num)| *price);
                 output.push((
                     (
-                        trades // open
-                            .clone()
-                            .min_by(|x, y| x.timestamp().cmp(&y.timestamp()))
-                            .map(|trade| trade.price())
-                            .unwrap_or_else(|| Decimal::from(0)),
-                        trades // high
-                            .clone()
-                            .map(|trade| trade.price())
-                            .max()
-                            .unwrap_or_else(|| Decimal::from(0)),
-                        trades // low
-                            .clone()
-                            .map(|trade| trade.price())
-                            .min()
-                            .unwrap_or_else(|| Decimal::from(0)),
-                        trades // close
-                            .clone()
-                            .max_by(|x, y| x.timestamp().cmp(&y.timestamp()))
-                            .map(|trade| trade.price())
-                            .unwrap_or_else(|| Decimal::from(0)),
+                        values.clone().next().unwrap_or_else(|| Decimal::from(0)),
+                        values.clone().last().unwrap_or_else(|| Decimal::from(0)),
                     ),
                     1_isize,
                 ));
             });
+
+            let low_high = prices.reduce(|_key, input, output| {
+                let values = input.iter().map(|&(price, _num)| *price);
+                output.push((
+                    (
+                        values.clone().next().unwrap_or_else(|| Decimal::from(0)),
+                        values.clone().last().unwrap_or_else(|| Decimal::from(0)),
+                    ),
+                    1_isize,
+                ));
+            });
+
+            let ohlc = open_close
+                .join(&low_high)
+                .map(|(key, ((open, close), (low, high)))| (key, (open, high, low, close)));
 
             let value_and_volume = trades_by_window_by_ticker
                 .explode(|(key, trade)| {
@@ -178,6 +183,8 @@ fn main() -> Result<(), MainError> {
 fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
     let url = url::Url::parse(format!("wss://socket.polygon.io/{}", MyTrade::SOCKET_PATH).as_str())
         .expect("hardcoded url should be valid");
+
+    println!("url: {}", url);
 
     let (mut socket, _) = connect(url).expect("Failed to connect");
     println!("WebSocket handshake has been successfully completed");
