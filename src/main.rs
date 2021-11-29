@@ -50,7 +50,7 @@ fn truncate(dur: Duration, inc: Duration) -> Duration {
 fn main() -> Result<(), MainError> {
     let rx = trades_feed()?;
 
-    let (aggs_tx, aggs_rx) = std::sync::mpsc::sync_channel(10_000);
+    let (aggs_tx, aggs_rx) = std::sync::mpsc::sync_channel(100_000);
     let mux = Arc::new(Mutex::new(aggs_tx));
 
     spawn(aggs_loop(aggs_rx));
@@ -138,7 +138,10 @@ fn main() -> Result<(), MainError> {
                         element2: volume,
                     },
                 )| {
-                    if Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts {
+                    if *value > Decimal::from(0)
+                        && *volume > Decimal::from(0)
+                        && Duration::from_millis(*agg_timestamp as u64) + RETENTION > *ts
+                    {
                         aggs_tx
                             .send((
                                 (ticker.clone(), *agg_timestamp),
@@ -161,7 +164,7 @@ fn main() -> Result<(), MainError> {
 
             input.insert(trade);
 
-            if Instant::now().duration_since(last_flush) > Duration::from_millis(25) {
+            if Instant::now().duration_since(last_flush) > Duration::from_millis(250) {
                 input.flush();
                 last_flush = Instant::now();
 
@@ -204,7 +207,7 @@ fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
         },
     )?;
 
-    let (tx, rx) = crossbeam::channel::bounded(10_000);
+    let (tx, rx) = crossbeam::channel::bounded(1_000_000);
 
     spawn(move || loop {
         if let Message::Text(data) = socket.read_message().unwrap() {
