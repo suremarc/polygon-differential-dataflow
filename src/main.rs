@@ -8,6 +8,7 @@ use std::{
 };
 
 use crossbeam::channel::Receiver;
+use rust_decimal::prelude::ToPrimitive;
 use tungstenite::{connect, Message};
 
 use differential_dataflow::difference::DiffPair;
@@ -203,18 +204,17 @@ fn aggs_loop(rx: std::sync::mpsc::Receiver<(AggKey, Stats)>) -> impl FnOnce() {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
 
-        aggs.retain(|(ticker, agg_timestamp), (value, volume, count, ts)| {
+        aggs.retain(|(ticker, agg_timestamp), (value, volume, count, _ts)| {
             let expired =
                 Duration::from_millis(*agg_timestamp as u64) + BAR_LENGTH < since_the_epoch;
             if expired {
                 println!(
-                    "{} - {}: {}, {}, {}, {:?}",
+                    "{} - {}: {:.2}, {:.3}, {}",
                     agg_timestamp,
                     ticker,
-                    *value / *volume,
-                    *volume,
-                    *count,
-                    *ts
+                    (*value / *volume).0.to_f64().unwrap(),
+                    volume.0.to_f64().unwrap(),
+                    *count
                 );
             }
 
