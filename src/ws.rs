@@ -204,7 +204,7 @@ impl Trade for StockTrade {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CryptoTrade {
     pub t: u64,
-    pub pair: arrayvec::ArrayString<10>,
+    pub pair: arrayvec::ArrayString<12>,
     pub p: Decimal,
     pub s: Decimal,
     pub c: tinyvec::ArrayVec<[u32; 4]>,

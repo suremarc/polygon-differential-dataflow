@@ -29,7 +29,7 @@ pub enum MainError {
 
 type MyTrade = ws::CryptoTrade;
 
-const BAR_LENGTH: Duration = Duration::from_secs(1);
+const BAR_LENGTH: Duration = Duration::from_secs(15);
 const RETENTION: Duration = Duration::from_secs(900);
 const GRACE_PERIOD: Duration = Duration::from_millis(0);
 const FLUSH_FREQUENCY: Duration = Duration::from_millis(25);
@@ -45,7 +45,7 @@ fn main() -> Result<(), MainError> {
         let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
-        worker.dataflow(|scope| {
+        worker.dataflow(|scope: &mut timely::dataflow::scopes::Child<_, Duration>| {
             let trades_old = SemigroupVariable::new(scope, RETENTION + BAR_LENGTH);
 
             let trades = input.to_collection(scope);
@@ -64,7 +64,7 @@ fn main() -> Result<(), MainError> {
 
             let windows_old = SemigroupVariable::new(scope, BAR_LENGTH + GRACE_PERIOD);
             let windows = trades_by_window_by_ticker
-                .map(|(key, _value)| key)
+                .map(|((_ticker, agg_timestamp), _value)| agg_timestamp)
                 .distinct();
             let windows_recent = windows.concat(&windows_old.negate()).consolidate();
             windows_old.set(&windows);
@@ -114,27 +114,23 @@ fn main() -> Result<(), MainError> {
             let stats = value_and_volume
                 .join(&count)
                 .map(|(key, ((), count))| (key, count))
-                .join(&ohlc);
+                .join(&ohlc)
+                .map(|((ticker, agg_timestamp), data)| (agg_timestamp, (ticker, data)));
 
             let stats_ready = stats.antijoin(&windows_recent).consolidate();
 
-            // windows_recent.probe_with(&mut probe).inspect(|data| {
-            //     println!("{:?}", data);
-            // });
-
             stats_ready.probe_with(&mut probe).inspect(
                 |(
-                    ((ticker, agg_timestamp), (count, (open, high, low, close))),
-                    _ts,
+                    (agg_timestamp, (ticker, (count, (open, high, low, close)))),
+                    ts,
                     DiffPair {
                         element1: value,
                         element2: volume,
                     },
                 )| {
-                    // println!("{}, {}", ticker, agg_timestamp);
                     if *value > Decimal::from(0) {
                         println!(
-                            "{} - {}: open: {:.2}, high: {:.2}, low: {:.2}, close: {:.2}, vwap: {:.2}, vol: {:.3}, trades: {}",
+                            "{} - {}: open: {:.2}, high: {:.2}, low: {:.2}, close: {:.2}, vwap: {:.2}, vol: {:.3}, trades: {}, latency: {}ms",
                             agg_timestamp,
                             ticker,
                             open.0.to_f64().unwrap(),
@@ -143,7 +139,8 @@ fn main() -> Result<(), MainError> {
                             close.0.to_f64().unwrap(),
                             (*value / *volume).0.to_f64().unwrap(),
                             volume.0.to_f64().unwrap(),
-                            *count
+                            *count,
+                            ts.as_millis() as i64 - *agg_timestamp - BAR_LENGTH.as_millis() as i64,
                         );
                     }
                 },
@@ -208,7 +205,8 @@ fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
 
     spawn(move || loop {
         if let Message::Text(data) = socket.read_message().unwrap() {
-            let messages: Vec<ws::Message<MyTrade>> = serde_json::from_str(data.as_str()).unwrap();
+            let messages: Vec<ws::Message<MyTrade>> =
+                serde_json::from_str(data.as_str()).expect(&data);
             for message in messages.iter() {
                 if let ws::Message::Trade(trade) = message {
                     tx.send(*trade).unwrap();
