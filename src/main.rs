@@ -31,7 +31,7 @@ type MyTrade = ws::CryptoTrade;
 
 const BAR_LENGTH: Duration = Duration::from_secs(15);
 const RETENTION: Duration = Duration::from_secs(900);
-const GRACE_PERIOD: Duration = Duration::from_millis(0);
+const GRACE_PERIOD: Duration = Duration::from_millis(25);
 const FLUSH_FREQUENCY: Duration = Duration::from_millis(25);
 
 fn truncate(dur: Duration, inc: Duration) -> Duration {
@@ -122,12 +122,15 @@ fn main() -> Result<(), MainError> {
             stats_ready.probe_with(&mut probe).inspect(
                 |(
                     (agg_timestamp, (ticker, (count, (open, high, low, close)))),
-                    ts,
+                    _ts,
                     DiffPair {
                         element1: value,
                         element2: volume,
                     },
                 )| {
+                    let ts_unix = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("time went backwards");
                     if *value > Decimal::from(0) {
                         println!(
                             "{} - {}: open: {:.2}, high: {:.2}, low: {:.2}, close: {:.2}, vwap: {:.2}, vol: {:.3}, trades: {}, latency: {}ms",
@@ -140,7 +143,7 @@ fn main() -> Result<(), MainError> {
                             (*value / *volume).0.to_f64().unwrap(),
                             volume.0.to_f64().unwrap(),
                             *count,
-                            ts.as_millis() as i64 - *agg_timestamp - BAR_LENGTH.as_millis() as i64,
+                            ts_unix.as_millis() as i64 - *agg_timestamp - BAR_LENGTH.as_millis() as i64,
                         );
                     }
                 },
