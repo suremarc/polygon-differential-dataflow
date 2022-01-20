@@ -8,10 +8,16 @@ use std::{
 
 use crossbeam::channel::Receiver;
 use rust_decimal::prelude::ToPrimitive;
+use timely::progress::Timestamp;
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{iterate::Variable, Consolidate, Count, Join, Threshold};
-use differential_dataflow::{difference::DiffPair, operators::Reduce};
+use differential_dataflow::{
+    difference::DiffPair, lattice::Lattice, operators::Reduce, ExchangeData, Hashable,
+};
+use differential_dataflow::{
+    operators::{iterate::Variable, Consolidate, Count, Join, Threshold},
+    Collection,
+};
 
 use rust_lib_aggs::ws::{self, Decimal, Trade};
 
@@ -44,13 +50,8 @@ fn main() -> Result<(), MainError> {
         let mut probe = timely::dataflow::ProbeHandle::new();
 
         worker.dataflow(|scope| {
-            let trades_old = Variable::new(scope, RETENTION + BAR_LENGTH);
-
             let trades = input.to_collection(scope);
-            let trades_recent = trades.concat(&trades_old.negate()).consolidate();
-
-            // Feed input trades forward so that they get retracted once RETENTION has passed
-            trades_old.set(&trades);
+            let trades_recent = temporal_filter(&trades, RETENTION + BAR_LENGTH);
 
             let trades_by_window = trades_recent.map(|trade: MyTrade| {
                 let agg_timestamp = truncate(trade.timestamp(), BAR_LENGTH).as_millis() as i64;
@@ -60,16 +61,16 @@ fn main() -> Result<(), MainError> {
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
 
-            let windows_old = Variable::new(scope, BAR_LENGTH + GRACE_PERIOD);
             let windows = trades_by_window_by_ticker
                 .map(|((_ticker, agg_timestamp), _value)| agg_timestamp)
                 .distinct();
-            let windows_recent = windows.concat(&windows_old.negate()).consolidate();
-            windows_old.set(&windows);
+            
+            let windows_recent = temporal_filter(&windows, BAR_LENGTH + GRACE_PERIOD);
 
-            let windows_expired = Variable::new(scope, RETENTION);
-            let windows_unexpired = windows.concat(&windows_expired.negate()).consolidate();
-            windows_expired.set(&windows);
+            let windows_unexpired = temporal_filter(&windows, RETENTION);
+            // let windows_expired = Variable::new(scope, RETENTION);
+            // let windows_unexpired = windows.concat(&windows_expired.negate()).consolidate();
+            // windows_expired.set(&windows);
 
             let prices_by_timestamp = trades_by_window_by_ticker
                 .map(|(key, trade)| (key, (trade.timestamp(), trade.price())));
@@ -234,4 +235,26 @@ fn try_send_payload<T: std::io::Write + std::io::Read>(
 ) -> Result<(), MainError> {
     let msg = Message::Text(serde_json::to_string(payload)?);
     socket.write_message(msg).map_err(MainError::Write)
+}
+
+// let trades_old = Variable::new(scope, RETENTION + BAR_LENGTH);
+
+// let trades = input.to_collection(scope);
+// let trades_recent = trades.concat(&trades_old.negate()).consolidate();
+
+// // Feed input trades forward so that they get retracted once RETENTION has passed
+// trades_old.set(&trades);
+
+fn temporal_filter<G: timely::dataflow::Scope, D: ExchangeData + Hashable>(
+    col: &Collection<G, D>,
+    window: <<G as timely::dataflow::ScopeParent>::Timestamp as Timestamp>::Summary,
+) -> Collection<G, D>
+where
+    G::Timestamp: Lattice,
+{
+    let previous = Variable::new(&mut col.scope(), window);
+    let recent = col.concat(&previous.negate()).consolidate();
+    previous.set(col);
+
+    recent
 }
