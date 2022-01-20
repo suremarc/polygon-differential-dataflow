@@ -2,18 +2,26 @@ extern crate differential_dataflow;
 extern crate timely;
 
 use std::{
+    sync::{Arc, Mutex},
     thread::spawn,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crossbeam::channel::Receiver;
 use rust_decimal::prelude::ToPrimitive;
+use timely::dataflow::Scope;
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{iterate::Variable, Consolidate, Count, Join, Threshold};
-use differential_dataflow::{difference::DiffPair, operators::Reduce};
+use differential_dataflow::{difference::DiffPair, input::Input, operators::Reduce};
+use differential_dataflow::{
+    operators::{iterate::Variable, Consolidate, Join},
+    Collection,
+};
 
-use rust_lib_aggs::ws::{self, Decimal, Trade};
+use rust_lib_aggs::{
+    pair::Partition,
+    ws::{self, Decimal, Trade},
+};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -37,136 +45,42 @@ fn truncate(dur: Duration, inc: Duration) -> Duration {
 }
 
 fn main() -> Result<(), MainError> {
-    let rx = trades_feed()?;
+    let feed = trades_feed()?;
+
+    let (tx, rx) = std::sync::mpsc::channel::<MyTrade>();
+    let tx = Arc::new(Mutex::new(tx));
 
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
-        let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
-        let mut probe = timely::dataflow::ProbeHandle::new();
+        let mut probe = timely::dataflow::ProbeHandle::<Partition>::new();
+        let tx = tx.lock().unwrap().clone();
 
-        worker.dataflow(|scope: &mut timely::dataflow::scopes::Child<_, Duration>| {
-            let trades_old = Variable::new(scope, RETENTION + BAR_LENGTH);
+        worker.dataflow(
+            |scope: &mut timely::dataflow::scopes::Child<_, Partition>| {
+                let output = scope.scoped::<Duration, _, _>("partition", |scope| {
+                    let trades = scope.new_collection::<MyTrade, isize>();
+                    let trades_by_window =
+                        trades.map(|trade| (truncate(trade.timestamp(), BAR_LENGTH), trade));
+                });
+            },
+        );
 
-            let trades = input.to_collection(scope);
-            let trades_recent = trades.concat(&trades_old.negate()).consolidate();
+        // let mut last_flush = Instant::now();
 
-            // Feed input trades forward so that they get retracted once RETENTION has passed
-            trades_old.set(&trades);
+        // for trade in rx.iter() {
+        //     input.advance_to(Partition::new(trade.ticker(), trade.timestamp()));
+        //     // println!("{:#?}", input.time());
 
-            let trades_by_window = trades_recent.map(|trade: MyTrade| {
-                let agg_timestamp = truncate(trade.timestamp(), BAR_LENGTH).as_millis() as i64;
-                (agg_timestamp, trade)
-            });
+        //     input.send(trade);
 
-            let trades_by_window_by_ticker = trades_by_window
-                .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
+        //     if Instant::now().duration_since(last_flush) > FLUSH_FREQUENCY {
+        //         input.flush();
+        //         last_flush = Instant::now();
 
-            let windows_old = Variable::new(scope, BAR_LENGTH + GRACE_PERIOD);
-            let windows = trades_by_window_by_ticker
-                .map(|((_ticker, agg_timestamp), _value)| agg_timestamp)
-                .distinct();
-            let windows_recent = windows.concat(&windows_old.negate()).consolidate();
-
-            let prices_by_timestamp = trades_by_window_by_ticker
-                .map(|(key, trade)| (key, (trade.timestamp(), trade.price())));
-            let prices = trades_by_window_by_ticker.map(|(key, trade)| (key, trade.price()));
-
-            let open_close = prices_by_timestamp.reduce(|_key, input, output| {
-                let values = input.iter().map(|&((_ts, price), _num)| *price);
-                output.push((
-                    (
-                        values.clone().next().unwrap_or_else(|| Decimal::from(0)),
-                        values.clone().last().unwrap_or_else(|| Decimal::from(0)),
-                    ),
-                    1_isize,
-                ));
-            });
-
-            let low_high = prices.reduce(|_key, input, output| {
-                let values = input.iter().map(|&(price, _num)| *price);
-                output.push((
-                    (
-                        values.clone().next().unwrap_or_else(|| Decimal::from(0)),
-                        values.clone().last().unwrap_or_else(|| Decimal::from(0)),
-                    ),
-                    1_isize,
-                ));
-            });
-
-            let ohlc = open_close
-                .join(&low_high)
-                .map(|(key, ((open, close), (low, high)))| (key, (open, high, low, close)));
-
-            let value_and_volume = trades_by_window_by_ticker
-                .explode(|(key, trade)| {
-                    Some((
-                        key,
-                        DiffPair::new(trade.price() * trade.volume(), trade.volume()),
-                    ))
-                })
-                .consolidate()
-                .map(|data| (data, ()));
-
-            let count = trades_by_window_by_ticker.map(|(key, _trade)| key).count();
-
-            let stats = value_and_volume
-                .join(&count)
-                .map(|(key, ((), count))| (key, count))
-                .join(&ohlc)
-                .map(|((ticker, agg_timestamp), data)| (agg_timestamp, (ticker, data)));
-
-            let stats_ready = stats.antijoin(&windows_recent).consolidate();
-
-            stats_ready.probe_with(&mut probe).inspect(
-                |(
-                    (agg_timestamp, (ticker, (count, (open, high, low, close)))),
-                    _ts,
-                    DiffPair {
-                        element1: value,
-                        element2: volume,
-                    },
-                )| {
-                    let ts_unix = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("time went backwards");
-                    if *value > Decimal::from(0) {
-                        println!(
-                            "{} - {}: open: {:.2}, high: {:.2}, low: {:.2}, close: {:.2}, vwap: {:.2}, vol: {:.3}, trades: {}, latency: {}ms",
-                            agg_timestamp,
-                            ticker,
-                            open.0.to_f64().unwrap(),
-                            high.0.to_f64().unwrap(),
-                            low.0.to_f64().unwrap(),
-                            close.0.to_f64().unwrap(),
-                            (*value / *volume).0.to_f64().unwrap(),
-                            volume.0.to_f64().unwrap(),
-                            *count,
-                            ts_unix.as_millis() as i64 - *agg_timestamp - BAR_LENGTH.as_millis() as i64,
-                        );
-                    }
-                },
-            );
-        });
-
-        let mut last_flush = Instant::now();
-
-        for trade in rx.iter() {
-            let ts_unix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time went backwards");
-            input.advance_to(ts_unix);
-            // println!("{:#?}", input.time());
-
-            input.insert(trade);
-
-            if Instant::now().duration_since(last_flush) > FLUSH_FREQUENCY {
-                input.flush();
-                last_flush = Instant::now();
-
-                while probe.less_than(input.time()) {
-                    worker.step_or_park(None);
-                }
-            }
-        }
+        //         while probe.less_than(input.time()) {
+        //             worker.step_or_park(None);
+        //         }
+        //     }
+        // }
     })
     .expect("Computation terminated abnormally");
 
