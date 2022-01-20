@@ -64,7 +64,7 @@ fn main() -> Result<(), MainError> {
             let windows = trades_by_window_by_ticker
                 .map(|((_ticker, agg_timestamp), _value)| agg_timestamp)
                 .distinct();
-            
+
             let windows_recent = temporal_filter(&windows, BAR_LENGTH + GRACE_PERIOD);
 
             let windows_unexpired = temporal_filter(&windows, RETENTION);
@@ -120,37 +120,42 @@ fn main() -> Result<(), MainError> {
                 .join(&ohlc)
                 .map(|((ticker, agg_timestamp), data)| (agg_timestamp, (ticker, data)));
 
-            let stats_ready = stats.antijoin(&windows_recent).semijoin(&windows_unexpired).consolidate();
+            let stats_ready = stats
+                .antijoin(&windows_recent)
+                .semijoin(&windows_unexpired)
+                .consolidate();
 
-            stats_ready.probe_with(&mut probe).inspect(
-                |(
-                    (agg_timestamp, (ticker, (count, (open, high, low, close)))),
-                    _ts,
-                    DiffPair {
-                        element1: value,
-                        element2: volume,
-                    },
-                )| {
-                    let ts_unix = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("time went backwards");
-                    if *value > Decimal::from(0) {
-                        println!(
-                            "{} {:>12}: open: {:8.2}, high: {:8.2}, low: {:8.2}, close: {:8.2}, vwap: {:8.2}, vol: {:14.3}, trades: {:3}, latency: {:3}ms",
-                            agg_timestamp,
-                            ticker,
-                            open.0.to_f64().unwrap(),
-                            high.0.to_f64().unwrap(),
-                            low.0.to_f64().unwrap(),
-                            close.0.to_f64().unwrap(),
-                            (*value / *volume).0.to_f64().unwrap(),
-                            volume.0.to_f64().unwrap(),
-                            *count,
-                            ts_unix.as_millis() as i64 - *agg_timestamp - BAR_LENGTH.as_millis() as i64,
-                        );
-                    }
-                },
-            );
+            stats_ready
+                .probe_with(&mut probe)
+                .inspect_batch(|_batch_ts, data| {
+                    data.iter().for_each(|(
+                        (agg_timestamp, (ticker, (count, (open, high, low, close)))),
+                        _ts,
+                        DiffPair {
+                            element1: value,
+                            element2: volume,
+                        },
+                    )| {
+                        let ts_unix = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("time went backwards");
+                        if *value > Decimal::from(0) {
+                            println!(
+                                "{} {:>12}: open: {:8.2}, high: {:8.2}, low: {:8.2}, close: {:8.2}, vwap: {:8.2}, vol: {:14.3}, trades: {:3}, latency: {:3}ms",
+                                agg_timestamp,
+                                ticker,
+                                open.0.to_f64().unwrap(),
+                                high.0.to_f64().unwrap(),
+                                low.0.to_f64().unwrap(),
+                                close.0.to_f64().unwrap(),
+                                (*value / *volume).0.to_f64().unwrap(),
+                                volume.0.to_f64().unwrap(),
+                                *count,
+                                ts_unix.as_millis() as i64 - *agg_timestamp - BAR_LENGTH.as_millis() as i64,
+                            );
+                        }
+                    });
+                });
         });
 
         let mut last_flush = Instant::now();
