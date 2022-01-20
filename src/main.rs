@@ -27,10 +27,10 @@ pub enum MainError {
 
 type MyTrade = ws::CryptoTrade;
 
-const BAR_LENGTH: Duration = Duration::from_secs(1);
-const RETENTION: Duration = Duration::from_secs(30);
+const BAR_LENGTH: Duration = Duration::from_secs(15);
+const RETENTION: Duration = Duration::from_secs(900);
 const GRACE_PERIOD: Duration = Duration::from_millis(25);
-const FLUSH_FREQUENCY: Duration = Duration::from_millis(25);
+const FLUSH_FREQUENCY: Duration = Duration::from_millis(250);
 
 fn truncate(dur: Duration, inc: Duration) -> Duration {
     Duration::from_nanos((dur.as_nanos() / inc.as_nanos() * inc.as_nanos()) as u64)
@@ -43,7 +43,7 @@ fn main() -> Result<(), MainError> {
         let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
-        worker.dataflow(|scope: &mut timely::dataflow::scopes::Child<_, Duration>| {
+        worker.dataflow(|scope| {
             let trades_old = Variable::new(scope, RETENTION + BAR_LENGTH);
 
             let trades = input.to_collection(scope);
@@ -65,6 +65,11 @@ fn main() -> Result<(), MainError> {
                 .map(|((_ticker, agg_timestamp), _value)| agg_timestamp)
                 .distinct();
             let windows_recent = windows.concat(&windows_old.negate()).consolidate();
+            windows_old.set(&windows);
+
+            let windows_expired = Variable::new(scope, RETENTION);
+            let windows_unexpired = windows.concat(&windows_expired.negate()).consolidate();
+            windows_expired.set(&windows);
 
             let prices_by_timestamp = trades_by_window_by_ticker
                 .map(|(key, trade)| (key, (trade.timestamp(), trade.price())));
@@ -114,7 +119,7 @@ fn main() -> Result<(), MainError> {
                 .join(&ohlc)
                 .map(|((ticker, agg_timestamp), data)| (agg_timestamp, (ticker, data)));
 
-            let stats_ready = stats.antijoin(&windows_recent).consolidate();
+            let stats_ready = stats.antijoin(&windows_recent).semijoin(&windows_unexpired).consolidate();
 
             stats_ready.probe_with(&mut probe).inspect(
                 |(
