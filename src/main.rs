@@ -30,7 +30,7 @@ type MyTrade = ws::CryptoTrade;
 const BAR_LENGTH: Duration = Duration::from_secs(15);
 const RETENTION: Duration = Duration::from_secs(900);
 const GRACE_PERIOD: Duration = Duration::from_millis(25);
-const FLUSH_FREQUENCY: Duration = Duration::from_millis(250);
+const FLUSH_FREQUENCY: Duration = Duration::from_millis(25);
 
 fn truncate(dur: Duration, inc: Duration) -> Duration {
     Duration::from_nanos((dur.as_nanos() / inc.as_nanos() * inc.as_nanos()) as u64)
@@ -135,7 +135,7 @@ fn main() -> Result<(), MainError> {
                         .expect("time went backwards");
                     if *value > Decimal::from(0) {
                         println!(
-                            "{} - {}: open: {:.2}, high: {:.2}, low: {:.2}, close: {:.2}, vwap: {:.2}, vol: {:.3}, trades: {}, latency: {}ms",
+                            "{} {:>12}: open: {:8.2}, high: {:8.2}, low: {:8.2}, close: {:8.2}, vwap: {:8.2}, vol: {:14.3}, trades: {:3}, latency: {:3}ms",
                             agg_timestamp,
                             ticker,
                             open.0.to_f64().unwrap(),
