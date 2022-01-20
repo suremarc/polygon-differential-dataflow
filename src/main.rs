@@ -10,9 +10,7 @@ use crossbeam::channel::Receiver;
 use rust_decimal::prelude::ToPrimitive;
 use tungstenite::{connect, Message};
 
-use differential_dataflow::operators::{
-    iterate::SemigroupVariable, Consolidate, Count, Join, Threshold,
-};
+use differential_dataflow::operators::{iterate::Variable, Consolidate, Count, Join, Threshold};
 use differential_dataflow::{difference::DiffPair, operators::Reduce};
 
 use rust_lib_aggs::ws::{self, Decimal, Trade};
@@ -29,8 +27,8 @@ pub enum MainError {
 
 type MyTrade = ws::CryptoTrade;
 
-const BAR_LENGTH: Duration = Duration::from_secs(15);
-const RETENTION: Duration = Duration::from_secs(900);
+const BAR_LENGTH: Duration = Duration::from_secs(1);
+const RETENTION: Duration = Duration::from_secs(30);
 const GRACE_PERIOD: Duration = Duration::from_millis(25);
 const FLUSH_FREQUENCY: Duration = Duration::from_millis(25);
 
@@ -46,7 +44,7 @@ fn main() -> Result<(), MainError> {
         let mut probe = timely::dataflow::ProbeHandle::new();
 
         worker.dataflow(|scope: &mut timely::dataflow::scopes::Child<_, Duration>| {
-            let trades_old = SemigroupVariable::new(scope, RETENTION + BAR_LENGTH);
+            let trades_old = Variable::new(scope, RETENTION + BAR_LENGTH);
 
             let trades = input.to_collection(scope);
             let trades_recent = trades.concat(&trades_old.negate()).consolidate();
@@ -62,12 +60,11 @@ fn main() -> Result<(), MainError> {
             let trades_by_window_by_ticker = trades_by_window
                 .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
 
-            let windows_old = SemigroupVariable::new(scope, BAR_LENGTH + GRACE_PERIOD);
+            let windows_old = Variable::new(scope, BAR_LENGTH + GRACE_PERIOD);
             let windows = trades_by_window_by_ticker
                 .map(|((_ticker, agg_timestamp), _value)| agg_timestamp)
                 .distinct();
             let windows_recent = windows.concat(&windows_old.negate()).consolidate();
-            windows_old.set(&windows);
 
             let prices_by_timestamp = trades_by_window_by_ticker
                 .map(|(key, trade)| (key, (trade.timestamp(), trade.price())));
