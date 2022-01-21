@@ -153,6 +153,12 @@ impl Monoid for Decimal {
     }
 }
 
+impl Default for Decimal {
+    fn default() -> Decimal {
+        Decimal::from(0)
+    }
+}
+
 pub trait Trade: Copy + Serialize + serde::de::DeserializeOwned {
     const SOCKET_PATH: &'static str;
     const FEED_PREFIX: &'static str;

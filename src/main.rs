@@ -8,7 +8,10 @@ use std::{
 
 use crossbeam::channel::Receiver;
 use rust_decimal::prelude::ToPrimitive;
-use timely::progress::Timestamp;
+use timely::{
+    dataflow::{Scope, ScopeParent},
+    progress::Timestamp,
+};
 use tungstenite::{connect, Message};
 
 use differential_dataflow::{
@@ -35,8 +38,8 @@ type MyTrade = ws::CryptoTrade;
 
 const BAR_LENGTH: Duration = Duration::from_secs(15);
 const RETENTION: Duration = Duration::from_secs(900);
-const GRACE_PERIOD: Duration = Duration::from_millis(25);
-const FLUSH_FREQUENCY: Duration = Duration::from_millis(25);
+const GRACE_PERIOD: Duration = Duration::from_millis(250);
+const FLUSH_FREQUENCY: Duration = Duration::from_millis(250);
 
 fn truncate(dur: Duration, inc: Duration) -> Duration {
     Duration::from_nanos((dur.as_nanos() / inc.as_nanos() * inc.as_nanos()) as u64)
@@ -66,11 +69,8 @@ fn main() -> Result<(), MainError> {
                 .distinct();
 
             let windows_recent = temporal_filter(&windows, BAR_LENGTH + GRACE_PERIOD);
-
             let windows_unexpired = temporal_filter(&windows, RETENTION);
-            // let windows_expired = Variable::new(scope, RETENTION);
-            // let windows_unexpired = windows.concat(&windows_expired.negate()).consolidate();
-            // windows_expired.set(&windows);
+            let windows_active = windows_unexpired.concat(&windows_recent.negate());
 
             let prices_by_timestamp = trades_by_window_by_ticker
                 .map(|(key, trade)| (key, (trade.timestamp(), trade.price())));
@@ -79,10 +79,7 @@ fn main() -> Result<(), MainError> {
             let open_close = prices_by_timestamp.reduce(|_key, input, output| {
                 let values = input.iter().map(|&((_ts, price), _num)| *price);
                 output.push((
-                    (
-                        values.clone().next().unwrap_or_else(|| Decimal::from(0)),
-                        values.clone().last().unwrap_or_else(|| Decimal::from(0)),
-                    ),
+                    values.clone().next().zip(values.clone().last()).unwrap_or_default(),
                     1_isize,
                 ));
             });
@@ -90,10 +87,7 @@ fn main() -> Result<(), MainError> {
             let low_high = prices.reduce(|_key, input, output| {
                 let values = input.iter().map(|&(price, _num)| *price);
                 output.push((
-                    (
-                        values.clone().next().unwrap_or_else(|| Decimal::from(0)),
-                        values.clone().last().unwrap_or_else(|| Decimal::from(0)),
-                    ),
+                    values.clone().next().zip(values.clone().last()).unwrap_or_default(),
                     1_isize,
                 ));
             });
@@ -104,10 +98,7 @@ fn main() -> Result<(), MainError> {
 
             let value_and_volume = trades_by_window_by_ticker
                 .explode(|(key, trade)| {
-                    Some((
-                        key,
-                        DiffPair::new(trade.price() * trade.volume(), trade.volume()),
-                    ))
+                    Some((key, DiffPair::new(trade.price() * trade.volume(), trade.volume())))
                 })
                 .consolidate()
                 .map(|data| (data, ()));
@@ -121,8 +112,7 @@ fn main() -> Result<(), MainError> {
                 .map(|((ticker, agg_timestamp), data)| (agg_timestamp, (ticker, data)));
 
             let stats_ready = stats
-                .antijoin(&windows_recent)
-                .semijoin(&windows_unexpired)
+                .semijoin(&windows_active)
                 .consolidate();
 
             stats_ready
@@ -242,17 +232,9 @@ fn try_send_payload<T: std::io::Write + std::io::Read>(
     socket.write_message(msg).map_err(MainError::Write)
 }
 
-// let trades_old = Variable::new(scope, RETENTION + BAR_LENGTH);
-
-// let trades = input.to_collection(scope);
-// let trades_recent = trades.concat(&trades_old.negate()).consolidate();
-
-// // Feed input trades forward so that they get retracted once RETENTION has passed
-// trades_old.set(&trades);
-
-fn temporal_filter<G: timely::dataflow::Scope, D: ExchangeData + Hashable>(
+fn temporal_filter<G: Scope, D: ExchangeData + Hashable>(
     col: &Collection<G, D>,
-    window: <<G as timely::dataflow::ScopeParent>::Timestamp as Timestamp>::Summary,
+    window: <<G as ScopeParent>::Timestamp as Timestamp>::Summary,
 ) -> Collection<G, D>
 where
     G::Timestamp: Lattice,
