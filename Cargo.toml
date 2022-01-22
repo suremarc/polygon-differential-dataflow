@@ -28,3 +28,5 @@ rust_decimal = { version = "1.16", features = ["maths", "serde-float"] }
 rust_decimal_macros = "1.16"
 
 crossbeam = "0.8.1"
+
+rand = "0.8.4"

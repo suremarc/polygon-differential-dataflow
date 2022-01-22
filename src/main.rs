@@ -1,10 +1,7 @@
 extern crate differential_dataflow;
 extern crate timely;
 
-use std::{
-    thread::spawn,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::thread::spawn;
 
 use crossbeam::channel::Receiver;
 use tungstenite::{connect, Message};
@@ -24,40 +21,15 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-const FLUSH_FREQUENCY: Duration = Duration::from_millis(250);
-
 fn main() -> Result<(), MainError> {
     let rx = trades_feed::<ws::CryptoTrade>()?;
 
-    timely::execute_from_args(std::env::args().skip(2), move |worker| {
-        let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
-        let mut probe = timely::dataflow::ProbeHandle::new();
-
-        worker.dataflow(dataflow::aggregate(&mut input, &mut probe, |agg| {
+    timely::execute_from_args(
+        std::env::args().skip(2),
+        dataflow::worker_loop(rx, |agg| {
             println!("{}", agg);
-        }));
-
-        let mut last_flush = Instant::now();
-
-        for trade in rx.iter() {
-            let ts_unix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time went backwards");
-            input.advance_to(ts_unix);
-            // println!("{:#?}", input.time());
-
-            input.insert(trade);
-
-            if Instant::now().duration_since(last_flush) > FLUSH_FREQUENCY {
-                input.flush();
-                last_flush = Instant::now();
-
-                while probe.less_than(input.time()) {
-                    worker.step_or_park(None);
-                }
-            }
-        }
-    })
+        }),
+    )
     .expect("Computation terminated abnormally");
 
     Ok(())

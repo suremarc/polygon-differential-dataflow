@@ -639,6 +639,7 @@ dependencies = [
  "crossbeam",
  "differential-dataflow",
  "futures",
+ "rand",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
