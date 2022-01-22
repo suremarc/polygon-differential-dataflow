@@ -7,22 +7,12 @@ use std::{
 };
 
 use crossbeam::channel::Receiver;
-use rust_decimal::prelude::ToPrimitive;
-use timely::{
-    dataflow::{Scope, ScopeParent},
-    progress::Timestamp,
-};
 use tungstenite::{connect, Message};
 
-use differential_dataflow::{
-    difference::DiffPair, lattice::Lattice, operators::Reduce, ExchangeData, Hashable,
+use rust_lib_aggs::{
+    dataflow,
+    ws::{self, WebsocketTrade},
 };
-use differential_dataflow::{
-    operators::{iterate::Variable, Consolidate, Count, Join, Threshold},
-    Collection,
-};
-
-use rust_lib_aggs::ws::{self, Decimal, Trade};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -34,119 +24,18 @@ pub enum MainError {
     Read(tungstenite::Error),
 }
 
-type MyTrade = ws::CryptoTrade;
-
-const BAR_LENGTH: Duration = Duration::from_secs(15);
-const RETENTION: Duration = Duration::from_secs(900);
-const GRACE_PERIOD: Duration = Duration::from_millis(250);
 const FLUSH_FREQUENCY: Duration = Duration::from_millis(250);
 
-fn truncate(dur: Duration, inc: Duration) -> Duration {
-    Duration::from_nanos((dur.as_nanos() / inc.as_nanos() * inc.as_nanos()) as u64)
-}
-
 fn main() -> Result<(), MainError> {
-    let rx = trades_feed()?;
+    let rx = trades_feed::<ws::CryptoTrade>()?;
 
     timely::execute_from_args(std::env::args().skip(2), move |worker| {
         let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
-        worker.dataflow(|scope| {
-            let trades = input.to_collection(scope);
-            let trades_recent = temporal_filter(&trades, RETENTION + BAR_LENGTH);
-
-            let trades_by_window = trades_recent.map(|trade: MyTrade| {
-                let agg_timestamp = truncate(trade.timestamp(), BAR_LENGTH).as_millis() as i64;
-                (agg_timestamp, trade)
-            });
-
-            let trades_by_window_by_ticker = trades_by_window
-                .map(|(agg_timestamp, trade)| ((trade.ticker(), agg_timestamp), trade));
-
-            let windows = trades_by_window_by_ticker
-                .map(|((_ticker, agg_timestamp), _value)| agg_timestamp)
-                .distinct();
-
-            let windows_recent = temporal_filter(&windows, BAR_LENGTH + GRACE_PERIOD);
-            let windows_unexpired = temporal_filter(&windows, RETENTION);
-            let windows_active = windows_unexpired.concat(&windows_recent.negate());
-
-            let prices_by_timestamp = trades_by_window_by_ticker
-                .map(|(key, trade)| (key, (trade.timestamp(), trade.price())));
-            let prices = trades_by_window_by_ticker.map(|(key, trade)| (key, trade.price()));
-
-            let open_close = prices_by_timestamp.reduce(|_key, input, output| {
-                let values = input.iter().map(|&((_ts, price), _num)| *price);
-                output.push((
-                    values.clone().next().zip(values.clone().last()).unwrap_or_default(),
-                    1_isize,
-                ));
-            });
-
-            let low_high = prices.reduce(|_key, input, output| {
-                let values = input.iter().map(|&(price, _num)| *price);
-                output.push((
-                    values.clone().next().zip(values.clone().last()).unwrap_or_default(),
-                    1_isize,
-                ));
-            });
-
-            let ohlc = open_close
-                .join(&low_high)
-                .map(|(key, ((open, close), (low, high)))| (key, (open, high, low, close)));
-
-            let value_and_volume = trades_by_window_by_ticker
-                .explode(|(key, trade)| {
-                    Some((key, DiffPair::new(trade.price() * trade.volume(), trade.volume())))
-                })
-                .consolidate()
-                .map(|data| (data, ()));
-
-            let count = trades_by_window_by_ticker.map(|(key, _trade)| key).count();
-
-            let stats = value_and_volume
-                .join(&count)
-                .map(|(key, ((), count))| (key, count))
-                .join(&ohlc)
-                .map(|((ticker, agg_timestamp), data)| (agg_timestamp, (ticker, data)));
-
-            let stats_ready = stats
-                .semijoin(&windows_active)
-                .consolidate();
-
-            stats_ready
-                .probe_with(&mut probe)
-                .inspect_batch(|_batch_ts, data| {
-                    data.iter().for_each(|(
-                        (agg_timestamp, (ticker, (count, (open, high, low, close)))),
-                        _ts,
-                        DiffPair {
-                            element1: value,
-                            element2: volume,
-                        },
-                    )| {
-                        let ts_unix = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("time went backwards");
-                        if *value > Decimal::from(0) {
-                            println!(
-                                "{} {:>12}: open: {:8.2}, high: {:8.2}, low: {:8.2}, close: {:8.2}, vwap: {:8.2}, vol: {:14.3}, trades: {:3}, latency: {:3}ms",
-                                agg_timestamp,
-                                ticker,
-                                open.0.to_f64().unwrap(),
-                                high.0.to_f64().unwrap(),
-                                low.0.to_f64().unwrap(),
-                                close.0.to_f64().unwrap(),
-                                (*value / *volume).0.to_f64().unwrap(),
-                                volume.0.to_f64().unwrap(),
-                                *count,
-                                ts_unix.as_millis() as i64 - *agg_timestamp - BAR_LENGTH.as_millis() as i64,
-                            );
-                        }
-                    });
-                });
-        });
+        worker.dataflow(dataflow::dataflow(&mut input, &mut probe, |agg| {
+            println!("{}", agg);
+        }));
 
         let mut last_flush = Instant::now();
 
@@ -174,8 +63,8 @@ fn main() -> Result<(), MainError> {
     Ok(())
 }
 
-fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
-    let url = url::Url::parse(format!("wss://socket.polygon.io/{}", MyTrade::SOCKET_PATH).as_str())
+fn trades_feed<T: 'static + WebsocketTrade + Send>() -> Result<Receiver<T>, MainError> {
+    let url = url::Url::parse(format!("wss://socket.polygon.io/{}", T::SOCKET_PATH).as_str())
         .expect("hardcoded url should be valid");
 
     println!("url: {}", url);
@@ -194,11 +83,7 @@ fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
         &mut socket,
         &ws::Action {
             action: ws::ActionType::Subscribe,
-            params: format!(
-                "{}.{}",
-                MyTrade::FEED_PREFIX,
-                std::env::args().nth(1).unwrap()
-            ),
+            params: format!("{}.{}", T::FEED_PREFIX, std::env::args().nth(1).unwrap()),
         },
     )?;
 
@@ -206,8 +91,7 @@ fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
 
     spawn(move || loop {
         if let Message::Text(data) = socket.read_message().unwrap() {
-            let messages: Vec<ws::Message<MyTrade>> =
-                serde_json::from_str(data.as_str()).expect(&data);
+            let messages: Vec<ws::Message<T>> = serde_json::from_str(data.as_str()).expect(&data);
             for message in messages.iter() {
                 if let ws::Message::Trade(trade) = message {
                     tx.send(*trade).unwrap();
@@ -215,7 +99,7 @@ fn trades_feed() -> Result<Receiver<MyTrade>, MainError> {
                     println!(
                         "{}",
                         serde_json::to_string(message).expect("failed to serialize Message")
-                    )
+                    );
                 }
             }
         }
@@ -230,18 +114,4 @@ fn try_send_payload<T: std::io::Write + std::io::Read>(
 ) -> Result<(), MainError> {
     let msg = Message::Text(serde_json::to_string(payload)?);
     socket.write_message(msg).map_err(MainError::Write)
-}
-
-fn temporal_filter<G: Scope, D: ExchangeData + Hashable>(
-    col: &Collection<G, D>,
-    window: <<G as ScopeParent>::Timestamp as Timestamp>::Summary,
-) -> Collection<G, D>
-where
-    G::Timestamp: Lattice,
-{
-    let previous = Variable::new(&mut col.scope(), window);
-    let recent = col.concat(&previous.negate()).consolidate();
-    previous.set(col);
-
-    recent
 }
