@@ -33,7 +33,7 @@ fn main() -> Result<(), MainError> {
         let mut input = differential_dataflow::input::InputSession::<_, _, isize>::new();
         let mut probe = timely::dataflow::ProbeHandle::new();
 
-        worker.dataflow(dataflow::dataflow(&mut input, &mut probe, |agg| {
+        worker.dataflow(dataflow::aggregate(&mut input, &mut probe, |agg| {
             println!("{}", agg);
         }));
 
