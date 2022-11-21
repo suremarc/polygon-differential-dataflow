@@ -4,12 +4,10 @@ extern crate timely;
 use std::thread::spawn;
 
 use crossbeam::channel::Receiver;
+use serde::Serialize;
 use tungstenite::{connect, Message};
 
-use rust_lib_aggs::{
-    dataflow,
-    ws::{self, WebsocketTrade},
-};
+use rust_lib_aggs::ws::{self, WebsocketTrade};
 
 #[derive(thiserror::Error, Debug)]
 pub enum MainError {
@@ -24,13 +22,13 @@ pub enum MainError {
 fn main() -> Result<(), MainError> {
     let rx = trades_feed::<ws::CryptoTrade>()?;
 
-    timely::execute_from_args(
-        std::env::args().skip(2),
-        dataflow::worker_loop(rx, |agg| {
-            println!("{}", agg);
-        }),
-    )
-    .expect("Computation terminated abnormally");
+    // timely::execute_from_args(
+    //     std::env::args().skip(2),
+    //     dataflow::worker_loop(rx, |agg| {
+    //         println!("{}", agg);
+    //     }),
+    // )
+    // .expect("Computation terminated abnormally");
 
     Ok(())
 }
@@ -66,7 +64,7 @@ fn trades_feed<T: 'static + WebsocketTrade + Send>() -> Result<Receiver<T>, Main
             let messages: Vec<ws::Message<T>> = serde_json::from_str(data.as_str()).expect(&data);
             for message in messages.iter() {
                 if let ws::Message::Trade(trade) = message {
-                    tx.send(*trade).unwrap();
+                    tx.send(trade.clone()).unwrap();
                 } else {
                     println!(
                         "{}",

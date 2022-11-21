@@ -74,8 +74,8 @@ fn default_c() -> tinyvec::ArrayVec<[u32; 6]> {
 }
 
 impl Trade for StockTrade {
-    fn ticker(&self) -> String {
-        String::from(self.sym.as_str())
+    fn ticker(&self) -> &str {
+        self.sym.as_str()
     }
     fn price(&self) -> Decimal {
         self.p
@@ -108,8 +108,8 @@ pub struct CryptoTrade {
 }
 
 impl Trade for CryptoTrade {
-    fn ticker(&self) -> String {
-        String::from(self.pair.as_str())
+    fn ticker(&self) -> &str {
+        self.pair.as_str()
     }
     fn price(&self) -> Decimal {
         self.p
